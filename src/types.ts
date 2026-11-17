@@ -22,6 +22,7 @@ export interface StudentProfile {
   avatar_color: string;
   avatar_url?: string;
   show_in_members?: number;
+  auth_hashes?: string[];
   created_at: string;
   attendance_count?: number;
   works_count?: number;

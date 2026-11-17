@@ -490,6 +490,7 @@ export function AdminSection({
           qr_code_token: `MMC-${cleanUser.toUpperCase().slice(0, 8)}`,
           avatar_color: '#1D4ED8',
           show_in_members: true,
+          password: password.trim() || undefined,
         });
       }
       if (getStoredToken()) {
@@ -560,7 +561,8 @@ export function AdminSection({
           qr_code_token: editQrToken.trim(),
           avatar_color: editAvatarColor,
           avatar_url: targetMember?.avatar_url,
-          show_in_members: true,
+          show_in_members: targetMember?.show_in_members !== 0,
+          password: editPass.trim() || undefined,
         });
       }
       if (getStoredToken()) {

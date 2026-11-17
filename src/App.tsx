@@ -42,7 +42,10 @@ import {
   subscribeSchedules,
   subscribeSiteSettings,
   subscribeWorks,
+  syncMemberAuthHashesAdmin,
 } from './lib/firestoreSync';
+
+const PORTAL_MEMBER_STORAGE_KEY = 'mmc_portal_member_username';
 import { HomeSection } from './components/HomeSection';
 import { GallerySection } from './components/GallerySection';
 import { MembersSection } from './components/MembersSection';
@@ -165,7 +168,11 @@ export default function App() {
       };
       setBootstrapReady(true);
 
-      setCurrentUser(data.user);
+      if (data.user) {
+        setCurrentUser(data.user);
+      } else if (!localStorage.getItem(PORTAL_MEMBER_STORAGE_KEY)) {
+        setCurrentUser(null);
+      }
       setLocalNews(data.news);
       setLocalSchedules(data.schedules);
       setLocalMembers(data.members);
@@ -282,36 +289,44 @@ export default function App() {
     };
   }, [isFirebaseAdmin]);
 
-  // Authenticated Cloud Firestore listeners (LMS Tasks, Attendance, Notifications)
+  // Authenticated OR Cross-Device Member Cloud Firestore listeners
   useEffect(() => {
-    if (!firebaseUser?.uid) {
-      setCloudAttendance(null);
-      setCloudLmsTasks(null);
-      setCloudAdminTasks(undefined);
-      setCloudNotifications(null);
-      return;
+    if (firebaseUser?.uid) {
+      const uid = firebaseUser.uid;
+      const unsubAtt = subscribeAttendanceRecords(isFirebaseAdmin, uid, (records) => {
+        setCloudAttendance(records);
+      });
+
+      const unsubLms = subscribeLmsTasks(isFirebaseAdmin, uid, (tasks, adminTasks) => {
+        setCloudLmsTasks(tasks);
+        setCloudAdminTasks(isFirebaseAdmin ? adminTasks : undefined);
+      });
+
+      const unsubNotifs = subscribeNotificationsFirestore(isFirebaseAdmin, uid, (notifs) => {
+        setCloudNotifications(notifs);
+      });
+
+      return () => {
+        unsubAtt();
+        unsubLms();
+        unsubNotifs();
+      };
     }
 
-    const uid = firebaseUser.uid;
-    const unsubAtt = subscribeAttendanceRecords(isFirebaseAdmin, uid, (records) => {
-      setCloudAttendance(records);
-    });
+    setCloudAttendance(null);
+    setCloudAdminTasks(undefined);
+    setCloudNotifications(null);
 
-    const unsubLms = subscribeLmsTasks(isFirebaseAdmin, uid, (tasks, adminTasks) => {
-      setCloudLmsTasks(tasks);
-      setCloudAdminTasks(isFirebaseAdmin ? adminTasks : undefined);
-    });
+    if (currentUser) {
+      const unsubLmsPublic = subscribeLmsTasks(false, '', (tasks) => {
+        setCloudLmsTasks(tasks);
+      });
+      return () => unsubLmsPublic();
+    }
 
-    const unsubNotifs = subscribeNotificationsFirestore(isFirebaseAdmin, uid, (notifs) => {
-      setCloudNotifications(notifs);
-    });
-
-    return () => {
-      unsubAtt();
-      unsubLms();
-      unsubNotifs();
-    };
-  }, [firebaseUser?.uid, isFirebaseAdmin]);
+    setCloudLmsTasks(null);
+    return undefined;
+  }, [firebaseUser?.uid, isFirebaseAdmin, currentUser]);
 
   // Admin-only Cloud Firestore listeners (PII NIS/NFC, Pending Works, Blocked Words)
   useEffect(() => {
@@ -339,9 +354,14 @@ export default function App() {
     };
   }, [firebaseUser?.uid, isFirebaseAdmin]);
 
-  // Auto-seed Cloud Firestore once when the Admin signs in with Google
+  // Auto-seed Cloud Firestore & ensure cross-device member auth hashes when Admin signs in with Google
   useEffect(() => {
-    if (!firebaseAuthReady || !isFirebaseAdmin || cloudSeeded || !bootstrapReady || !bootstrapRef.current) {
+    if (!firebaseAuthReady || !isFirebaseAdmin) return;
+    if (cloudSeeded) {
+      syncMemberAuthHashesAdmin().catch(() => {});
+      return;
+    }
+    if (!bootstrapReady || !bootstrapRef.current) {
       return;
     }
     if (autoSeedAttemptedRef.current) return;
@@ -403,10 +423,23 @@ export default function App() {
   }, [rawMembers, privateMembersMap]);
 
   const attendanceRecords = firebaseUser && cloudAttendance !== null ? cloudAttendance : localAttendance;
-  const lmsTasks = firebaseUser && cloudLmsTasks !== null ? cloudLmsTasks : localLmsTasks;
+  const lmsTasks = (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudLmsTasks : localLmsTasks;
   const notifications = firebaseUser && cloudNotifications !== null ? cloudNotifications : localNotifications;
   const pendingWorksCount =
     isFirebaseAdmin && cloudPendingWorks !== undefined ? cloudPendingWorks.length : localPendingWorksCount;
+
+  // Restore saved cross-device member login from localStorage once cloud members load
+  useEffect(() => {
+    if (currentUser) return;
+    const savedUsername = localStorage.getItem(PORTAL_MEMBER_STORAGE_KEY);
+    if (!savedUsername || members.length === 0) return;
+    const restored = members.find(
+      (m) => m.username.trim().toLowerCase() === savedUsername.trim().toLowerCase()
+    );
+    if (restored) {
+      setCurrentUser(restored);
+    }
+  }, [currentUser, members]);
 
   // Synthesize effectiveUser from local session OR authenticated Firebase Google session
   const effectiveUser = useMemo<StudentProfile | null>(() => {
@@ -622,6 +655,7 @@ export default function App() {
   const handleLogout = async () => {
     await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     await signOutGoogle().catch(() => {});
+    localStorage.removeItem(PORTAL_MEMBER_STORAGE_KEY);
     setStoredToken(null);
     setToken(null);
     setCurrentUser(null);
@@ -1071,10 +1105,14 @@ export default function App() {
       <LoginModal
         open={loginOpen}
         onClose={() => setLoginOpen(false)}
+        members={members}
         onLoginSuccess={(user, newToken) => {
+          localStorage.setItem(PORTAL_MEMBER_STORAGE_KEY, user.username);
           setCurrentUser(user);
           setToken(newToken);
-          loadBootstrap();
+          if (newToken) {
+            loadBootstrap();
+          }
           showToast(`Selamat datang, ${user.full_name}.`, 'success');
         }}
         onGoogleLoginSuccess={(email) => {

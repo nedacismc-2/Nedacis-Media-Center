@@ -130,6 +130,7 @@ service cloud.firestore {
           'showInMembers',
           'isVisible',
           'ownerUid',
+          'authHashes',
           'attendanceCount',
           'worksCount',
           'lmsPoints',
@@ -150,6 +151,11 @@ service cloud.firestore {
         && (!('showInMembers' in data) || data.showInMembers is bool)
         && data.isVisible is bool
         && (!('ownerUid' in data) || isStr(data.ownerUid, 0, 128))
+        && (!('authHashes' in data) || (
+          data.authHashes is list
+          && data.authHashes.size() <= 6
+          && (data.authHashes.size() == 0 || isStr(data.authHashes[0], 64, 64))
+        ))
         && (!('attendanceCount' in data) || (data.attendanceCount is number && data.attendanceCount >= 0))
         && (!('worksCount' in data) || (data.worksCount is number && data.worksCount >= 0))
         && (!('lmsPoints' in data) || (data.lmsPoints is number && data.lmsPoints >= 0))
@@ -824,8 +830,8 @@ service cloud.firestore {
     }
 
     match /lms_tasks/{taskId} {
-      allow get: if isValidId(taskId) && (isAdmin() || (isVerifiedUser() && existing().isPublished == true));
-      allow list: if isAdmin() || (isVerifiedUser() && existing().isPublished == true);
+      allow get: if isValidId(taskId) && (existing().isPublished == true || isAdmin());
+      allow list: if existing().isPublished == true || isAdmin();
       allow create: if isValidId(taskId)
         && isAdmin()
         && isValidLmsTask(incoming())
@@ -842,8 +848,8 @@ service cloud.firestore {
       match /stages/{stageId} {
         allow get: if isValidId(taskId)
           && isValidId(stageId)
-          && (isAdmin() || (isVerifiedUser() && get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true));
-        allow list: if isAdmin() || (isVerifiedUser() && get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true);
+          && (isAdmin() || get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true);
+        allow list: if isAdmin() || get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true;
         allow create: if isValidId(taskId)
           && isValidId(stageId)
           && isAdmin()

@@ -57,6 +57,37 @@ export function deterministicNumericId(str: string): number {
   return (hash >>> 0) % 2000000000 + 1;
 }
 
+export async function sha256Hex(raw: string): Promise<string> {
+  const data = new TextEncoder().encode(raw);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export async function buildMemberAuthHashes(params: {
+  qrCodeToken?: string;
+  nis?: string;
+  password?: string;
+  existingHashes?: string[];
+}): Promise<string[]> {
+  const set = new Set<string>(
+    (params.existingHashes || []).filter((h) => typeof h === 'string' && h.length === 64)
+  );
+  const candidates = [
+    params.qrCodeToken?.trim().toLowerCase(),
+    params.nis?.trim().toLowerCase(),
+    params.password?.trim(),
+    params.password?.trim().toLowerCase(),
+  ].filter((v): v is string => Boolean(v));
+
+  for (const c of candidates) {
+    const hex = await sha256Hex(c);
+    set.add(hex);
+  }
+  return Array.from(set).slice(0, 6);
+}
+
 // ==================== SITE SETTINGS (BRANDING / HERO / FOOTER / SOCIAL) ====================
 
 export function subscribeSiteSettings(
@@ -314,6 +345,7 @@ export function subscribeMembersPublic(
           avatar_color: String(d.avatarColor || '#1D4ED8'),
           avatar_url: String(d.avatarUrl || ''),
           show_in_members: d.showInMembers ? 1 : 0,
+          auth_hashes: Array.isArray(d.authHashes) ? d.authHashes.map(String) : [],
           created_at: toIsoString(d.createdAt),
           attendance_count: Number(d.attendanceCount || 0),
           works_count: Number(d.worksCount || 0),
@@ -328,6 +360,72 @@ export function subscribeMembersPublic(
     },
     (error) => handleFirestoreError(error, OperationType.LIST, path)
   );
+}
+
+export async function verifyMemberLoginInFirestore(
+  usernameInput: string,
+  loginIdInput: string,
+  cachedMembers: StudentProfile[] = []
+): Promise<StudentProfile> {
+  const cleanUser = usernameInput.trim().toLowerCase();
+  const cleanId = loginIdInput.trim();
+  if (!cleanUser || !cleanId) {
+    throw new Error('Username dan ID Login wajib diisi.');
+  }
+
+  let candidate = cachedMembers.find((m) => m.username.trim().toLowerCase() === cleanUser) || null;
+
+  if (!candidate) {
+    const snap = await getDocs(
+      query(collection(db, 'members_public'), where('username', '==', cleanUser))
+    );
+    const docSnap = snap.docs[0];
+    if (docSnap) {
+      const d = docSnap.data();
+      candidate = {
+        id: Number(d.legacyId) || deterministicNumericId(docSnap.id),
+        firestoreId: docSnap.id,
+        username: String(d.username || docSnap.id),
+        role: d.role === 'admin' ? 'admin' : 'student',
+        full_name: String(d.fullName || ''),
+        nis: '',
+        kelas: String(d.kelas || ''),
+        division: String(d.division || ''),
+        bio: String(d.bio || ''),
+        nfc_uid: '',
+        qr_code_token: String(d.qrCodeToken || ''),
+        avatar_color: String(d.avatarColor || '#1D4ED8'),
+        avatar_url: String(d.avatarUrl || ''),
+        show_in_members: d.showInMembers ? 1 : 0,
+        auth_hashes: Array.isArray(d.authHashes) ? d.authHashes.map(String) : [],
+        created_at: toIsoString(d.createdAt),
+        attendance_count: Number(d.attendanceCount || 0),
+        works_count: Number(d.worksCount || 0),
+        lms_points: Number(d.lmsPoints || 0),
+      };
+    }
+  }
+
+  if (!candidate) {
+    throw new Error('Username atau ID Login tidak ditemukan.');
+  }
+
+  const lowerHash = await sha256Hex(cleanId.toLowerCase());
+  const exactHash = await sha256Hex(cleanId);
+  const hashes = candidate.auth_hashes || [];
+
+  const matched =
+    (Boolean(candidate.qr_code_token) &&
+      candidate.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase()) ||
+    (Boolean(candidate.nis) && candidate.nis.trim().toLowerCase() === cleanId.toLowerCase()) ||
+    hashes.includes(lowerHash) ||
+    hashes.includes(exactHash);
+
+  if (!matched) {
+    throw new Error('Username atau ID Login tidak sesuai.');
+  }
+
+  return candidate;
 }
 
 export function subscribeMembersPrivateAdmin(
@@ -366,6 +464,7 @@ export async function saveStudentToFirestore(params: {
   avatar_color: string;
   avatar_url?: string;
   show_in_members?: boolean;
+  password?: string;
 }): Promise<string> {
   const memberId = params.memberId || sanitizeDocId(`member_${params.username.toLowerCase()}`);
   const pubRef = doc(db, 'members_public', memberId);
@@ -373,6 +472,16 @@ export async function saveStudentToFirestore(params: {
 
   try {
     const existingSnap = await getDoc(pubRef);
+    const existingHashes = existingSnap.exists() && Array.isArray(existingSnap.data().authHashes)
+      ? (existingSnap.data().authHashes as string[])
+      : [];
+    const authHashes = await buildMemberAuthHashes({
+      qrCodeToken: params.qr_code_token,
+      nis: params.nis,
+      password: params.password || (!existingSnap.exists() ? (params.role === 'admin' ? 'pembina123' : 'siswa123') : undefined),
+      existingHashes,
+    });
+
     const batch = writeBatch(db);
     if (!existingSnap.exists()) {
       batch.set(pubRef, {
@@ -389,6 +498,7 @@ export async function saveStudentToFirestore(params: {
         showInMembers: params.show_in_members ?? true,
         isVisible: true,
         ownerUid: '',
+        authHashes,
         attendanceCount: 0,
         worksCount: 0,
         lmsPoints: 0,
@@ -405,6 +515,7 @@ export async function saveStudentToFirestore(params: {
         qrCodeToken: clampStr(params.qr_code_token, 60),
         avatarColor: clampStr(params.avatar_color || '#1D4ED8', 16),
         avatarUrl: clampStr(params.avatar_url || '', 500),
+        authHashes,
         updatedAt: serverTimestamp(),
       });
     }
@@ -893,27 +1004,32 @@ export function subscribeLmsTasks(
         const tasks: LmsTask[] = [];
         const adminTasks: AdminLmsTask[] = [];
 
-        const progressSnap = await getDocs(
-          query(collection(db, 'lms_task_progress'), where('userUid', '==', uid))
-        );
         const progressByTask = new Map<string, Array<{ stage_id: number; stageFirestoreId: string; response_text: string; completed_at: string }>>();
-        for (const p of progressSnap.docs) {
-          const pd = p.data();
-          const tId = String(pd.taskId || '');
-          const arr = progressByTask.get(tId) || [];
-          arr.push({
-            stage_id: 0,
-            stageFirestoreId: String(pd.stageId || ''),
-            response_text: String(pd.responseText || ''),
-            completed_at: toIsoString(pd.completedAt),
-          });
-          progressByTask.set(tId, arr);
-        }
+        let subSnapDocs: Array<{ id: string; data: () => Record<string, unknown> }> = [];
 
-        const subQuery = isAdmin
-          ? query(collection(db, 'lms_task_submissions'))
-          : query(collection(db, 'lms_task_submissions'), where('userUid', '==', uid));
-        const subSnap = await getDocs(subQuery);
+        if (uid) {
+          const progressSnap = await getDocs(
+            query(collection(db, 'lms_task_progress'), where('userUid', '==', uid))
+          );
+          for (const p of progressSnap.docs) {
+            const pd = p.data();
+            const tId = String(pd.taskId || '');
+            const arr = progressByTask.get(tId) || [];
+            arr.push({
+              stage_id: 0,
+              stageFirestoreId: String(pd.stageId || ''),
+              response_text: String(pd.responseText || ''),
+              completed_at: toIsoString(pd.completedAt),
+            });
+            progressByTask.set(tId, arr);
+          }
+
+          const subQuery = isAdmin
+            ? query(collection(db, 'lms_task_submissions'))
+            : query(collection(db, 'lms_task_submissions'), where('userUid', '==', uid));
+          const subSnap = await getDocs(subQuery);
+          subSnapDocs = subSnap.docs.map((s) => ({ id: s.id, data: () => s.data() }));
+        }
 
         for (let idx = 0; idx < snap.docs.length; idx++) {
           const docSnap = snap.docs[idx];
@@ -948,7 +1064,7 @@ export function subscribeLmsTasks(
             };
           });
 
-          const taskSubs: AdminLmsSubmission[] = subSnap.docs
+          const taskSubs: AdminLmsSubmission[] = subSnapDocs
             .filter((s) => s.data().taskId === docSnap.id)
             .map((s) => {
               const sd = s.data();
@@ -1326,9 +1442,15 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
       updatedAt: serverTimestamp(),
     });
 
-    // 2. Members (public + private)
+    // 2. Members (public + private) with SHA-256 authHashes for cross-device login
     for (const m of bootstrapData.members) {
       const memberId = sanitizeDocId(`member_${m.username}`);
+      const defaultPass = m.role === 'admin' ? 'pembina123' : 'siswa123';
+      const authHashes = await buildMemberAuthHashes({
+        qrCodeToken: m.qr_code_token || `MMC-${m.id}`,
+        nis: m.nis || `NIS-${m.id}`,
+        password: defaultPass,
+      });
       batch.set(doc(db, 'members_public', memberId), {
         legacyId: m.id,
         username: clampStr(m.username, 60),
@@ -1343,6 +1465,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         showInMembers: Boolean(m.show_in_members),
         isVisible: true,
         ownerUid: '',
+        authHashes,
         attendanceCount: Number(m.attendance_count || 0),
         worksCount: Number(m.works_count || 0),
         lmsPoints: Number(m.lms_points || 0),
@@ -1457,5 +1580,49 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'site_settings/portal');
+  }
+}
+
+export async function syncMemberAuthHashesAdmin(): Promise<void> {
+  if (!auth.currentUser?.uid) return;
+  try {
+    const [pubSnap, privSnap] = await Promise.all([
+      getDocs(collection(db, 'members_public')),
+      getDocs(collection(db, 'members_private')),
+    ]);
+    const nisMap = new Map<string, string>();
+    for (const p of privSnap.docs) {
+      nisMap.set(p.id, String(p.data().nis || ''));
+    }
+
+    const batch = writeBatch(db);
+    let pendingUpdates = 0;
+
+    for (const mDoc of pubSnap.docs) {
+      const d = mDoc.data();
+      const existingHashes = Array.isArray(d.authHashes) ? (d.authHashes as string[]) : [];
+      if (existingHashes.length > 0) continue;
+      const role = d.role === 'admin' ? 'admin' : 'student';
+      const username = String(d.username || '');
+      const defaultPass = username === 'admin' ? 'adminmmc' : role === 'admin' ? 'pembina123' : 'siswa123';
+      const hashes = await buildMemberAuthHashes({
+        qrCodeToken: String(d.qrCodeToken || ''),
+        nis: nisMap.get(mDoc.id) || '',
+        password: defaultPass,
+      });
+      if (hashes.length > 0) {
+        batch.update(doc(db, 'members_public', mDoc.id), {
+          authHashes: hashes,
+          updatedAt: serverTimestamp(),
+        });
+        pendingUpdates++;
+      }
+    }
+
+    if (pendingUpdates > 0) {
+      await batch.commit();
+    }
+  } catch {
+    // Non-fatal background sync
   }
 }

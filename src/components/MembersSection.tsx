@@ -346,7 +346,7 @@ export function MembersSection({
                     {member.full_name}
                   </h1>
                   <p className="text-xs font-mono text-slate-500">
-                    @{member.username} · {member.role === 'admin' ? member.nis : `NIS ${member.nis}`}
+                    @{member.username} · {member.nis ? (member.role === 'admin' ? member.nis : `NIS ${member.nis}`) : `ID ${member.qr_code_token}`}
                   </p>
                   {isOwnProfile && (
                     <label className="inline-flex items-center gap-1.5 pt-1 text-xs font-semibold text-[#1D4ED8] hover:underline cursor-pointer">
@@ -781,6 +781,8 @@ export function MembersSection({
 
   // Directory Grid (Pembina + Registered Students)
   const filteredMembers = members.filter((m) => {
+    const isVisibleMember = m.role === 'student' || m.show_in_members === 1;
+    if (!isVisibleMember) return false;
     const matchDiv =
       division === 'Semua' ||
       (division === 'Pembina' ? m.role === 'admin' : m.division === division);
@@ -790,6 +792,7 @@ export function MembersSection({
       m.full_name.toLowerCase().includes(q) ||
       m.kelas.toLowerCase().includes(q) ||
       m.nis.includes(q) ||
+      m.qr_code_token.toLowerCase().includes(q) ||
       m.username.toLowerCase().includes(q);
     return matchDiv && matchQ;
   });
@@ -871,7 +874,7 @@ export function MembersSection({
                   {member.full_name}
                 </h3>
                 <p className="text-xs font-mono text-slate-500 tabular-nums">
-                  {member.role === 'admin' ? member.nis : `NIS ${member.nis}`}
+                  {member.nis ? (member.role === 'admin' ? member.nis : `NIS ${member.nis}`) : `ID ${member.qr_code_token}`}
                 </p>
               </div>
             </div>

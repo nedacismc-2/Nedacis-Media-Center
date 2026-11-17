@@ -404,13 +404,20 @@ function getSiteSettings() {
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body as { username?: string; password?: string };
   if (!username || !password) {
-    res.status(400).json({ error: 'Username dan password wajib diisi.' });
+    res.status(400).json({ error: 'Username dan ID Login wajib diisi.' });
     return;
   }
 
   const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username.trim()) as (AuthUser & { password_hash: string }) | undefined;
-  if (!user || !verifyPassword(password, user.password_hash)) {
-    res.status(401).json({ error: 'Username atau password tidak sesuai.' });
+  const cleanId = password.trim();
+  const idMatched =
+    Boolean(user) &&
+    (verifyPassword(cleanId, user!.password_hash) ||
+      (Boolean(user!.qr_code_token) && user!.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase()) ||
+      (Boolean(user!.nis) && user!.nis.trim().toLowerCase() === cleanId.toLowerCase()));
+
+  if (!user || !idMatched) {
+    res.status(401).json({ error: 'Username atau ID Login tidak sesuai.' });
     return;
   }
 

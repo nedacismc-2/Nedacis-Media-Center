@@ -1,20 +1,29 @@
 import { useState, type FormEvent } from 'react';
-import { Cloud, Lock, User, X } from 'lucide-react';
+import { Eye, EyeOff, Lock, User, X } from 'lucide-react';
 import type { StudentProfile } from '../types';
 import { apiFetch, setStoredToken } from '../lib/api';
+import { verifyMemberLoginInFirestore } from '../lib/firestoreSync';
 import { useFirebase } from '../context/FirebaseContext';
 
 interface LoginModalProps {
   open: boolean;
   onClose: () => void;
-  onLoginSuccess: (user: StudentProfile, token: string) => void;
+  members?: StudentProfile[];
+  onLoginSuccess: (user: StudentProfile, token: string | null) => void;
   onGoogleLoginSuccess?: (email: string | null) => void;
 }
 
-export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess }: LoginModalProps) {
+export function LoginModal({
+  open,
+  onClose,
+  members = [],
+  onLoginSuccess,
+  onGoogleLoginSuccess,
+}: LoginModalProps) {
   const { signInWithGoogle, firebaseUser, isFirebaseAdmin } = useFirebase();
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [loginId, setLoginId] = useState('');
+  const [showId, setShowId] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -43,19 +52,35 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
     }
   };
 
-  const submitLogin = async (u: string, p: string) => {
+  const submitLogin = async (u: string, idInput: string) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<{ token: string; user: StudentProfile }>('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ username: u, password: p }),
-      });
-      setStoredToken(res.token);
-      onLoginSuccess(res.user, res.token);
+      // 1. Attempt backend session login when local server is available
+      let localMatched: { token: string; user: StudentProfile } | null = null;
+      try {
+        localMatched = await apiFetch<{ token: string; user: StudentProfile }>('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ username: u.trim(), password: idInput.trim() }),
+        });
+      } catch {
+        localMatched = null;
+      }
+
+      if (localMatched) {
+        setStoredToken(localMatched.token);
+        onLoginSuccess(localMatched.user, localMatched.token);
+        onClose();
+        return;
+      }
+
+      // 2. Verify across all devices & browsers via Cloud Firestore member directory
+      const cloudMember = await verifyMemberLoginInFirestore(u, idInput, members);
+      setStoredToken(null);
+      onLoginSuccess(cloudMember, null);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal masuk.');
+      setError(err instanceof Error ? err.message : 'Username atau ID Login tidak sesuai.');
     } finally {
       setLoading(false);
     }
@@ -63,7 +88,7 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    submitLogin(username, password);
+    submitLogin(username, loginId);
   };
 
   return (
@@ -78,7 +103,7 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-slate-900">Masuk Akun MMC</h2>
-            <p className="text-xs text-slate-500">SMPN 2 Ciamis · Cloud Firebase &amp; Akun Anggota</p>
+            <p className="text-xs text-slate-500">SMPN 2 Ciamis · Portal Resmi Anggota &amp; Pembina</p>
           </div>
           <button
             type="button"
@@ -96,23 +121,11 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
             </div>
           )}
 
-          {/* Firebase Google Sign-In Section */}
-          <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
-            <div className="flex items-start gap-2.5">
-              <Cloud className="w-4 h-4 text-[#1D4ED8] shrink-0 mt-0.5" />
-              <div className="text-xs text-slate-700 leading-relaxed">
-                <p className="font-semibold text-slate-900">
-                  Masuk dengan Google (Sinkronisasi Lintas Perangkat)
-                </p>
-                <p className="mt-0.5 text-[11px] text-slate-600">
-                  Akun <span className="font-mono font-medium">NedacisMC@gmail.com</span> otomatis mendapatkan akses Admin penuh dan menyimpan seluruh perubahan ke Cloud Firestore.
-                </p>
-              </div>
-            </div>
-
+          {/* Google Sign-In Button Only */}
+          <div>
             {firebaseUser ? (
-              <div className="p-2.5 bg-white border border-emerald-200 rounded-lg text-xs text-emerald-800 font-medium">
-                Terhubung: {firebaseUser.email} {isFirebaseAdmin ? '(Admin Cloud)' : '(Anggota Cloud)'}
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 font-medium text-center">
+                Terhubung: {firebaseUser.email} {isFirebaseAdmin ? '(Admin)' : ''}
               </div>
             ) : (
               <button
@@ -147,7 +160,7 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
           <div className="relative flex items-center">
             <div className="flex-grow border-t border-slate-200" />
             <span className="shrink mx-3 text-[11px] font-medium text-slate-400 uppercase tracking-wider">
-              Atau Akun Portal
+              Atau Login Anggota
             </span>
             <div className="flex-grow border-t border-slate-200" />
           </div>
@@ -162,25 +175,38 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
                   required
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="mis. ahmad.fauzan atau admin"
+                  placeholder="Masukkan username anggota"
                   className="w-full pl-10 pr-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1.5">Password</label>
+              <label className="block text-xs font-medium text-slate-700 mb-1.5">
+                ID Login Anggota
+              </label>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
-                  type="password"
+                  type={showId ? 'text' : 'password'}
                   required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Masukkan password"
-                  className="w-full pl-10 pr-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                  value={loginId}
+                  onChange={(e) => setLoginId(e.target.value)}
+                  placeholder="Masukkan ID anggota (mis. MMC-CMS-001)"
+                  className="w-full pl-10 pr-10 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowId((prev) => !prev)}
+                  aria-label={showId ? 'Sembunyikan ID Login' : 'Tampilkan ID Login'}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700"
+                >
+                  {showId ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
+              <p className="mt-1.5 text-[11px] text-slate-500">
+                Gunakan username beserta Kode ID anggota, NIS/NIP, atau password akun Anda.
+              </p>
             </div>
 
             <button
@@ -190,44 +216,6 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
             >
               {loading ? 'Memverifikasi...' : 'Masuk ke Portal'}
             </button>
-
-            <div className="pt-3 border-t border-slate-100 space-y-2">
-              <p className="text-[11px] font-medium text-slate-500">Akses Cepat Uji Coba:</p>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => submitLogin('ahmad.fauzan', 'siswa123')}
-                  className="px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl text-left"
-                >
-                  <span className="block font-semibold text-slate-900">Akun Siswa</span>
-                  <span className="font-mono text-[10px] text-slate-500">ahmad.fauzan / siswa123</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => submitLogin('admin', 'adminmmc')}
-                  className="px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl text-left"
-                >
-                  <span className="block font-semibold text-slate-900">Admin Utama</span>
-                  <span className="font-mono text-[10px] text-slate-500">admin / adminmmc</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => submitLogin('pembina1', 'pembina123')}
-                  className="px-3 py-2 text-xs font-medium text-slate-700 bg-blue-50/70 hover:bg-blue-100 border border-blue-200/70 rounded-xl text-left"
-                >
-                  <span className="block font-semibold text-[#1D4ED8]">Akun Pembina 1</span>
-                  <span className="font-mono text-[10px] text-slate-500">pembina1 / pembina123</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => submitLogin('pembina2', 'pembina123')}
-                  className="px-3 py-2 text-xs font-medium text-slate-700 bg-blue-50/70 hover:bg-blue-100 border border-blue-200/70 rounded-xl text-left"
-                >
-                  <span className="block font-semibold text-[#1D4ED8]">Akun Pembina 2</span>
-                  <span className="font-mono text-[10px] text-slate-500">pembina2 / pembina123</span>
-                </button>
-              </div>
-            </div>
           </form>
         </div>
       </div>
