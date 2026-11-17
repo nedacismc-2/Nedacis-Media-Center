@@ -30,7 +30,12 @@ export function LoginModal({ open, onClose, onLoginSuccess, onGoogleLoginSuccess
       onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal masuk dengan akun Google.';
-      if (!msg.includes('popup-closed-by-user')) {
+      if (msg.includes('auth/unauthorized-domain')) {
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'domain ini';
+        setError(
+          `Domain "${host}" belum diizinkan oleh Firebase Auth (auth/unauthorized-domain). Tambahkan "${host}" di Firebase Console → Authentication → Settings → Authorized domains.`
+        );
+      } else if (!msg.includes('popup-closed-by-user')) {
         setError(msg);
       }
     } finally {
