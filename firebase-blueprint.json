@@ -164,6 +164,7 @@
         "commentsDisabled": { "type": "boolean" },
         "approvalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"] },
         "reviewNote": { "type": "string", "maxLength": 300 },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -284,6 +285,7 @@
         "status": { "type": "string", "enum": ["submitted", "approved", "revision"] },
         "pointsAwarded": { "type": "number" },
         "adminFeedback": { "type": "string", "maxLength": 500 },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
         "submittedAt": { "type": "string", "format": "date-time" },
         "reviewedAt": { "type": "string", "format": "date-time" }
       },

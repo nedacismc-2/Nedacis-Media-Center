@@ -678,13 +678,16 @@ export async function createWorkInFirestore(params: {
 export async function reviewWorkInFirestore(
   workId: string,
   decision: 'approved' | 'rejected',
-  note: string
+  note: string,
+  actorMemberId?: string
 ): Promise<void> {
   const path = `works/${workId}`;
+  const uid = auth.currentUser?.uid || (actorMemberId ? sanitizeDocId(actorMemberId) : '');
   try {
     await updateDoc(doc(db, 'works', workId), {
       approvalStatus: decision,
       reviewNote: clampStr(note, 300),
+      ...(uid ? { reviewedByUid: uid } : {}),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -813,12 +816,15 @@ export async function shareWorkInFirestore(
 
 export async function toggleWorkCommentsInFirestore(
   workId: string,
-  commentsDisabled: boolean
+  commentsDisabled: boolean,
+  actorMemberId?: string
 ): Promise<void> {
   const path = `works/${workId}`;
+  const uid = auth.currentUser?.uid || (actorMemberId ? sanitizeDocId(actorMemberId) : '');
   try {
     await updateDoc(doc(db, 'works', workId), {
       commentsDisabled,
+      ...(uid ? { reviewedByUid: uid } : {}),
       updatedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -1109,7 +1115,10 @@ export function subscribeLmsTasks(
   const path = 'lms_tasks';
   const cleanMemberId = memberId ? sanitizeDocId(memberId) : '';
   const actorIds = Array.from(new Set([uid, cleanMemberId].filter(Boolean)));
-  const q = isAdmin ? query(collection(db, path)) : query(collection(db, path), where('isPublished', '==', true));
+  const q =
+    isAdmin && Boolean(auth.currentUser)
+      ? query(collection(db, path))
+      : query(collection(db, path), where('isPublished', '==', true));
 
   return onSnapshot(
     q,
@@ -1441,13 +1450,16 @@ export async function reviewLmsSubmissionInFirestore(params: {
   status: 'approved' | 'revision';
   pointsAwarded: number;
   adminFeedback: string;
+  actorMemberId?: string;
 }): Promise<void> {
   const path = `lms_task_submissions/${params.submissionId}`;
+  const uid = auth.currentUser?.uid || (params.actorMemberId ? sanitizeDocId(params.actorMemberId) : '');
   try {
     await updateDoc(doc(db, 'lms_task_submissions', params.submissionId), {
       status: params.status,
       pointsAwarded: Math.max(0, Math.min(10000, Number(params.pointsAwarded) || 0)),
       adminFeedback: clampStr(params.adminFeedback, 500),
+      ...(uid ? { reviewedByUid: uid } : {}),
       reviewedAt: serverTimestamp(),
     });
   } catch (error) {
@@ -1458,11 +1470,16 @@ export async function reviewLmsSubmissionInFirestore(params: {
 // ==================== BLOCKED WORDS & MEMBER PROFILE SELF-UPDATE ====================
 
 export function subscribeBlockedWords(
-  onData: (words: Array<{ id: number; firestoreId: string; word: string }>) => void
+  onData: (words: Array<{ id: number; firestoreId: string; word: string }>) => void,
+  isAdmin = false
 ): Unsubscribe {
   const path = 'blocked_words';
+  const q =
+    isAdmin && Boolean(auth.currentUser)
+      ? query(collection(db, path))
+      : query(collection(db, path), where('isActive', '==', true));
   return onSnapshot(
-    query(collection(db, path)),
+    q,
     (snap) => {
       const list = snap.docs
         .map((docSnap) => ({

@@ -4,9 +4,11 @@ import {
   getDoc,
   getDocs,
   onSnapshot,
+  query,
   serverTimestamp,
   setDoc,
   Timestamp,
+  where,
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
@@ -312,10 +314,13 @@ export async function uploadFileToCloud(
 
 export function subscribeUploadedFilesAdmin(
   onData: (summary: CloudStorageSummary) => void,
-  onError?: (err: unknown) => void
+  options?: { isAdmin?: boolean; onError?: (err: unknown) => void }
 ): Unsubscribe {
+  const q = options?.isAdmin
+    ? collection(db, 'uploaded_files')
+    : query(collection(db, 'uploaded_files'), where('isPublic', '==', true));
   return onSnapshot(
-    collection(db, 'uploaded_files'),
+    q,
     (snap) => {
       let totalRawBytes = 0;
       let estimatedFirestoreBytes = 0;
@@ -368,7 +373,7 @@ export function subscribeUploadedFilesAdmin(
       });
     },
     (err) => {
-      onError?.(err);
+      options?.onError?.(err);
     }
   );
 }

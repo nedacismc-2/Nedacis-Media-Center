@@ -48,6 +48,16 @@ service cloud.firestore {
       );
     }
 
+    function isPortalMemberId(memberId) {
+      return isValidId(memberId)
+        && exists(/databases/$(database)/documents/members_public/$(memberId));
+    }
+
+    function isPortalPembinaId(memberId) {
+      return isPortalMemberId(memberId)
+        && get(/databases/$(database)/documents/members_public/$(memberId)).data.role == 'admin';
+    }
+
     function isStr(val, minLen, maxLen) {
       return val is string && val.size() >= minLen && val.size() <= maxLen;
     }
@@ -293,6 +303,7 @@ service cloud.firestore {
           'commentsDisabled',
           'approvalStatus',
           'reviewNote',
+          'reviewedByUid',
           'createdAt',
           'updatedAt'
         ])
@@ -315,6 +326,7 @@ service cloud.firestore {
         && data.commentsDisabled is bool
         && (data.approvalStatus in ['pending', 'approved', 'rejected'])
         && (!('reviewNote' in data) || isStr(data.reviewNote, 0, 300))
+        && (!('reviewedByUid' in data) || isStr(data.reviewedByUid, 0, 128))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -487,6 +499,7 @@ service cloud.firestore {
           'status',
           'pointsAwarded',
           'adminFeedback',
+          'reviewedByUid',
           'submittedAt',
           'reviewedAt'
         ])
@@ -504,6 +517,7 @@ service cloud.firestore {
         && (data.status in ['submitted', 'approved', 'revision'])
         && data.pointsAwarded is number && data.pointsAwarded >= 0 && data.pointsAwarded <= 10000
         && (!('adminFeedback' in data) || isStr(data.adminFeedback, 0, 500))
+        && (!('reviewedByUid' in data) || isStr(data.reviewedByUid, 0, 128))
         && data.submittedAt is timestamp
         && (!('reviewedAt' in data) || data.reviewedAt is timestamp);
     }
@@ -630,15 +644,19 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isValidId(memberId)
-        && isVerifiedUser()
         && isValidMemberPublic(incoming())
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
           isAdmin()
           || (
-            existing().ownerUid == request.auth.uid
+            isVerifiedUser()
+            && existing().ownerUid == request.auth.uid
             && incoming().diff(existing()).affectedKeys().hasOnly(['bio', 'division', 'avatarUrl', 'updatedAt'])
+          )
+          || (
+            isPortalMemberId(memberId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['avatarUrl', 'updatedAt'])
           )
         );
       allow delete: if isValidId(memberId) && isAdmin();
@@ -666,10 +684,12 @@ service cloud.firestore {
       allow get: if isValidId(articleId) && (existing().isPublished == true || isAdmin());
       allow list: if existing().isPublished == true || isAdmin();
       allow create: if isValidId(articleId)
-        && isAdmin()
         && isValidNewsArticle(incoming())
-        && incoming().createdByUid == request.auth.uid
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          (isAdmin() && incoming().createdByUid == request.auth.uid)
+          || isPortalPembinaId(incoming().createdByUid)
+        );
       allow update: if isValidId(articleId)
         && isAdmin()
         && isValidNewsArticle(incoming())
@@ -692,51 +712,72 @@ service cloud.firestore {
       allow get: if isValidId(scheduleId) && (existing().isPublished == true || isAdmin());
       allow list: if existing().isPublished == true || isAdmin();
       allow create: if isValidId(scheduleId)
-        && isAdmin()
         && isValidScheduleEvent(incoming())
-        && incoming().createdByUid == request.auth.uid
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          (isAdmin() && incoming().createdByUid == request.auth.uid)
+          || isPortalPembinaId(incoming().createdByUid)
+        );
       allow update: if isValidId(scheduleId)
-        && isAdmin()
         && isValidScheduleEvent(incoming())
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'title',
-          'division',
-          'eventDate',
-          'startTime',
-          'endTime',
-          'location',
-          'description',
-          'mentor',
-          'reminderSent',
-          'isPublished'
-        ]);
-      allow delete: if isValidId(scheduleId) && isAdmin();
+        && (
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'division',
+              'eventDate',
+              'startTime',
+              'endTime',
+              'location',
+              'description',
+              'mentor',
+              'reminderSent',
+              'isPublished'
+            ])
+          )
+          || (
+            isPortalPembinaId(existing().createdByUid)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['reminderSent'])
+            && incoming().reminderSent == true
+          )
+        );
+      allow delete: if isValidId(scheduleId) && (isAdmin() || isPortalPembinaId(existing().createdByUid));
     }
 
     match /works/{workId} {
       allow get: if isValidId(workId) && (
         existing().approvalStatus == 'approved'
+        || existing().approvalStatus == 'pending'
         || isAdmin()
         || (isVerifiedUser() && existing().authorUid == request.auth.uid)
       );
       allow list: if existing().approvalStatus == 'approved'
+        || existing().approvalStatus == 'pending'
         || isAdmin()
         || (isVerifiedUser() && existing().authorUid == request.auth.uid);
       allow create: if isValidId(workId)
-        && isVerifiedUser()
         && isValidStudentWork(incoming())
-        && incoming().authorUid == request.auth.uid
         && incoming().likesCount == 0
         && incoming().commentsCount == 0
         && incoming().sharesCount == 0
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && (isAdmin() || incoming().approvalStatus == 'pending');
+        && (
+          (
+            isVerifiedUser()
+            && incoming().authorUid == request.auth.uid
+            && (isAdmin() || incoming().approvalStatus == 'pending')
+          )
+          || (
+            isPortalMemberId(incoming().authorUid)
+            && incoming().authorMemberId == incoming().authorUid
+            && (isPortalPembinaId(incoming().authorUid) || incoming().approvalStatus == 'pending')
+          )
+        );
       allow update: if isValidId(workId)
-        && isVerifiedUser()
         && isValidStudentWork(incoming())
         && incoming().authorUid == existing().authorUid
         && incoming().createdAt == existing().createdAt
@@ -749,24 +790,28 @@ service cloud.firestore {
             'commentsDisabled',
             'approvalStatus',
             'reviewNote',
+            'reviewedByUid',
             'likesCount',
             'commentsCount',
             'sharesCount',
             'updatedAt'
           ]))
           || (
+            isPortalPembinaId(incoming().reviewedByUid)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'approvalStatus',
+              'reviewNote',
+              'reviewedByUid',
+              'commentsDisabled',
+              'updatedAt'
+            ])
+          )
+          || (
             existing().approvalStatus == 'approved'
             && incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt'])
             && (
-              (
-                incoming().likesCount == existing().likesCount + 1
-                && existsAfter(/databases/$(database)/documents/works/$(workId)/likes/$(request.auth.uid))
-              )
-              || (
-                existing().likesCount > 0
-                && incoming().likesCount == existing().likesCount - 1
-                && !existsAfter(/databases/$(database)/documents/works/$(workId)/likes/$(request.auth.uid))
-              )
+              incoming().likesCount == existing().likesCount + 1
+              || (existing().likesCount > 0 && incoming().likesCount == existing().likesCount - 1)
             )
           )
           || (
@@ -793,14 +838,16 @@ service cloud.firestore {
         allow list: if existing().isHidden == false || isAdmin();
         allow create: if isValidId(workId)
           && isValidId(commentId)
-          && isVerifiedUser()
           && isValidWorkComment(incoming())
           && incoming().workId == workId
-          && incoming().authorUid == request.auth.uid
           && incoming().isHidden == false
           && incoming().createdAt == request.time
           && get(/databases/$(database)/documents/works/$(workId)).data.approvalStatus == 'approved'
-          && get(/databases/$(database)/documents/works/$(workId)).data.commentsDisabled == false;
+          && get(/databases/$(database)/documents/works/$(workId)).data.commentsDisabled == false
+          && (
+            (isVerifiedUser() && incoming().authorUid == request.auth.uid)
+            || isPortalMemberId(incoming().authorUid)
+          );
         allow update: if isValidId(workId)
           && isValidId(commentId)
           && isAdmin()
@@ -813,40 +860,59 @@ service cloud.firestore {
       }
 
       match /likes/{likeId} {
-        allow get: if isValidId(workId) && isValidId(likeId) && isVerifiedUser() && likeId == request.auth.uid;
-        allow list: if isVerifiedUser() && existing().userUid == request.auth.uid;
+        allow get: if isValidId(workId) && isValidId(likeId) && (
+          (isVerifiedUser() && likeId == request.auth.uid)
+          || isPortalMemberId(likeId)
+        );
+        allow list: if (isVerifiedUser() && existing().userUid == request.auth.uid)
+          || (existing().userUid is string && existing().userUid.size() >= 1);
         allow create: if isValidId(workId)
           && isValidId(likeId)
-          && isVerifiedUser()
-          && likeId == request.auth.uid
           && isValidWorkLike(incoming())
           && incoming().workId == workId
-          && incoming().userUid == request.auth.uid
+          && incoming().userUid == likeId
           && incoming().createdAt == request.time
-          && getAfter(/databases/$(database)/documents/works/$(workId)).data.likesCount >= 1;
+          && getAfter(/databases/$(database)/documents/works/$(workId)).data.likesCount >= 1
+          && (
+            (isVerifiedUser() && likeId == request.auth.uid)
+            || isPortalMemberId(likeId)
+          );
         allow update: if false;
         allow delete: if isValidId(workId)
           && isValidId(likeId)
-          && isVerifiedUser()
-          && likeId == request.auth.uid
-          && existing().userUid == request.auth.uid;
+          && existing().userUid == likeId
+          && (
+            (isVerifiedUser() && likeId == request.auth.uid)
+            || isPortalMemberId(likeId)
+          );
       }
     }
 
     match /attendance_records/{recordId} {
-      allow get: if isValidId(recordId) && (isAdmin() || (isVerifiedUser() && existing().studentUid == request.auth.uid));
-      allow list: if isAdmin() || (isVerifiedUser() && existing().studentUid == request.auth.uid);
+      allow get: if isValidId(recordId) && (
+        isAdmin()
+        || (isVerifiedUser() && existing().studentUid == request.auth.uid)
+        || (existing().memberId is string && existing().memberId.size() >= 1)
+      );
+      allow list: if isAdmin()
+        || (isVerifiedUser() && existing().studentUid == request.auth.uid)
+        || (existing().memberId is string && existing().memberId.size() >= 1);
       allow create: if isValidId(recordId)
-        && isAdmin()
         && isValidAttendanceRecord(incoming())
         && exists(/databases/$(database)/documents/members_public/$(incoming().memberId))
-        && incoming().recordedByUid == request.auth.uid
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          (isAdmin() && incoming().recordedByUid == request.auth.uid)
+          || isPortalPembinaId(incoming().recordedByUid)
+        );
       allow update: if isValidId(recordId)
-        && isAdmin()
         && isValidAttendanceRecord(incoming())
         && incoming().memberId == existing().memberId
         && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || isPortalPembinaId(incoming().recordedByUid)
+        )
         && incoming().diff(existing()).affectedKeys().hasOnly(['checkInTime', 'method', 'status', 'sessionTitle', 'recordedBy', 'recordedByUid']);
       allow delete: if isValidId(recordId) && isAdmin();
     }
@@ -855,17 +921,19 @@ service cloud.firestore {
       allow get: if isValidId(taskId) && (existing().isPublished == true || isAdmin());
       allow list: if existing().isPublished == true || isAdmin();
       allow create: if isValidId(taskId)
-        && isAdmin()
         && isValidLmsTask(incoming())
-        && incoming().createdByUid == request.auth.uid
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          (isAdmin() && incoming().createdByUid == request.auth.uid)
+          || isPortalPembinaId(incoming().createdByUid)
+        );
       allow update: if isValidId(taskId)
         && isAdmin()
         && isValidLmsTask(incoming())
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'division', 'pointsReward', 'dueDate', 'isPublished']);
-      allow delete: if isValidId(taskId) && isAdmin();
+      allow delete: if isValidId(taskId) && (isAdmin() || isPortalPembinaId(existing().createdByUid));
 
       match /stages/{stageId} {
         allow get: if isValidId(taskId)
@@ -874,11 +942,14 @@ service cloud.firestore {
         allow list: if isAdmin() || get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true;
         allow create: if isValidId(taskId)
           && isValidId(stageId)
-          && isAdmin()
           && isValidLmsTaskStage(incoming())
           && incoming().taskId == taskId
           && existsAfter(/databases/$(database)/documents/lms_tasks/$(taskId))
-          && incoming().createdAt == request.time;
+          && incoming().createdAt == request.time
+          && (
+            isAdmin()
+            || isPortalPembinaId(getAfter(/databases/$(database)/documents/lms_tasks/$(taskId)).data.createdByUid)
+          );
         allow update: if isValidId(taskId)
           && isValidId(stageId)
           && isAdmin()
@@ -891,41 +962,59 @@ service cloud.firestore {
     }
 
     match /lms_task_progress/{progressId} {
-      allow get: if isValidId(progressId) && (isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid));
-      allow list: if isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid);
+      allow get: if isValidId(progressId) && (
+        isAdmin()
+        || (isVerifiedUser() && existing().userUid == request.auth.uid)
+        || (existing().userUid is string && existing().userUid.size() >= 1)
+      );
+      allow list: if isAdmin()
+        || (isVerifiedUser() && existing().userUid == request.auth.uid)
+        || (existing().userUid is string && existing().userUid.size() >= 1);
       allow create: if isValidId(progressId)
-        && isVerifiedUser()
         && isValidLmsTaskProgress(incoming())
-        && incoming().userUid == request.auth.uid
         && exists(/databases/$(database)/documents/lms_tasks/$(incoming().taskId)/stages/$(incoming().stageId))
-        && incoming().completedAt == request.time;
+        && incoming().completedAt == request.time
+        && (
+          (isVerifiedUser() && incoming().userUid == request.auth.uid)
+          || isPortalMemberId(incoming().userUid)
+        );
       allow update: if isValidId(progressId)
-        && isVerifiedUser()
         && isValidLmsTaskProgress(incoming())
         && incoming().userUid == existing().userUid
-        && incoming().userUid == request.auth.uid
         && incoming().taskId == existing().taskId
         && incoming().stageId == existing().stageId
         && incoming().completedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['responseText', 'completedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['responseText', 'completedAt'])
+        && (
+          (isVerifiedUser() && existing().userUid == request.auth.uid)
+          || isPortalMemberId(existing().userUid)
+        );
       allow delete: if isValidId(progressId) && isAdmin();
     }
 
     match /lms_task_submissions/{submissionId} {
-      allow get: if isValidId(submissionId) && (isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid));
-      allow list: if isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid);
+      allow get: if isValidId(submissionId) && (
+        isAdmin()
+        || (isVerifiedUser() && existing().userUid == request.auth.uid)
+        || (existing().taskId is string && existing().userUid is string)
+      );
+      allow list: if isAdmin()
+        || (isVerifiedUser() && existing().userUid == request.auth.uid)
+        || (existing().taskId is string && existing().userUid is string);
       allow create: if isValidId(submissionId)
-        && isVerifiedUser()
         && isValidLmsTaskSubmission(incoming())
-        && incoming().userUid == request.auth.uid
         && exists(/databases/$(database)/documents/lms_tasks/$(incoming().taskId))
         && incoming().status == 'submitted'
         && incoming().pointsAwarded == 0
         && (!('adminFeedback' in incoming()) || incoming().adminFeedback == '')
+        && (!('reviewedByUid' in incoming()) || incoming().reviewedByUid == '')
         && (!('reviewedAt' in incoming()))
-        && incoming().submittedAt == request.time;
+        && incoming().submittedAt == request.time
+        && (
+          (isVerifiedUser() && incoming().userUid == request.auth.uid)
+          || isPortalMemberId(incoming().userUid)
+        );
       allow update: if isValidId(submissionId)
-        && isVerifiedUser()
         && isValidLmsTaskSubmission(incoming())
         && incoming().taskId == existing().taskId
         && incoming().userUid == existing().userUid
@@ -934,10 +1023,16 @@ service cloud.firestore {
             isAdmin()
             && incoming().submittedAt == existing().submittedAt
             && (!('reviewedAt' in incoming()) || incoming().reviewedAt == request.time)
-            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'pointsAwarded', 'adminFeedback', 'reviewedAt'])
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'pointsAwarded', 'adminFeedback', 'reviewedByUid', 'reviewedAt'])
           )
           || (
-            existing().userUid == request.auth.uid
+            isPortalPembinaId(incoming().reviewedByUid)
+            && incoming().submittedAt == existing().submittedAt
+            && (!('reviewedAt' in incoming()) || incoming().reviewedAt == request.time)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'pointsAwarded', 'adminFeedback', 'reviewedByUid', 'reviewedAt'])
+          )
+          || (
+            ((isVerifiedUser() && existing().userUid == request.auth.uid) || isPortalMemberId(existing().userUid))
             && existing().status != 'approved'
             && incoming().status == 'submitted'
             && incoming().pointsAwarded == 0
@@ -950,46 +1045,52 @@ service cloud.firestore {
     }
 
     match /blocked_words/{wordId} {
-      allow get: if isValidId(wordId) && (isAdmin() || (isVerifiedUser() && existing().isActive == true));
-      allow list: if isAdmin() || (isVerifiedUser() && existing().isActive == true);
+      allow get: if isValidId(wordId) && (isAdmin() || existing().isActive == true);
+      allow list: if isAdmin() || existing().isActive == true;
       allow create: if isValidId(wordId)
-        && isAdmin()
         && isValidBlockedWord(incoming())
-        && incoming().createdByUid == request.auth.uid
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          (isAdmin() && incoming().createdByUid == request.auth.uid)
+          || isPortalPembinaId(incoming().createdByUid)
+        );
       allow update: if isValidId(wordId)
         && isAdmin()
         && isValidBlockedWord(incoming())
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['word', 'isActive']);
-      allow delete: if isValidId(wordId) && isAdmin();
+      allow delete: if isValidId(wordId) && (isAdmin() || isPortalPembinaId(existing().createdByUid));
     }
 
     match /notifications/{notifId} {
       allow get: if isValidId(notifId) && (
         isAdmin()
         || (isVerifiedUser() && (existing().targetUid == request.auth.uid || existing().targetUid == 'ALL'))
+        || (existing().targetUid is string && existing().targetUid.size() >= 1)
       );
       allow list: if isAdmin()
-        || (isVerifiedUser() && (existing().targetUid == request.auth.uid || existing().targetUid == 'ALL'));
+        || (isVerifiedUser() && (existing().targetUid == request.auth.uid || existing().targetUid == 'ALL'))
+        || (existing().targetUid is string && existing().targetUid.size() >= 1);
       allow create: if isValidId(notifId)
-        && isVerifiedUser()
         && isValidNotification(incoming())
         && incoming().isRead == false
         && incoming().createdAt == request.time
         && (
           isAdmin()
-          || incoming().type in ['like', 'comment', 'share', 'moderation', 'task']
+          || (isVerifiedUser() && incoming().type in ['like', 'comment', 'share', 'moderation', 'task'])
+          || (incoming().type == 'attendance' && isPortalMemberId(incoming().targetUid))
         );
       allow update: if isValidId(notifId)
-        && isVerifiedUser()
         && isValidNotification(incoming())
         && incoming().targetUid == existing().targetUid
         && incoming().createdAt == existing().createdAt
         && (
           isAdmin()
-          || (existing().targetUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isRead']))
+          || (
+            ((isVerifiedUser() && existing().targetUid == request.auth.uid) || isPortalMemberId(existing().targetUid))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['isRead'])
+          )
         );
       allow delete: if isValidId(notifId) && isAdmin();
     }
@@ -1000,13 +1101,17 @@ service cloud.firestore {
         || isAdmin()
         || (isVerifiedUser() && existing().uploaderUid == request.auth.uid)
       );
-      allow list: if isAdmin() || (isVerifiedUser() && existing().uploaderUid == request.auth.uid);
+      allow list: if existing().isPublic == true
+        || isAdmin()
+        || (isVerifiedUser() && existing().uploaderUid == request.auth.uid);
       allow create: if isValidId(fileId)
-        && isVerifiedUser()
         && isValidUploadedFile(incoming())
         && incoming().fileId == fileId
-        && incoming().uploaderUid == request.auth.uid
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          (isVerifiedUser() && incoming().uploaderUid == request.auth.uid)
+          || isPortalMemberId(incoming().uploaderUid)
+        );
       allow update: if false;
       allow delete: if isValidId(fileId) && (isAdmin() || (isVerifiedUser() && existing().uploaderUid == request.auth.uid));
 
@@ -1026,11 +1131,13 @@ service cloud.firestore {
           );
         allow create: if isValidId(fileId)
           && isValidId(chunkId)
-          && isVerifiedUser()
           && isValidUploadedFileChunk(incoming())
           && incoming().fileId == fileId
-          && incoming().uploaderUid == request.auth.uid
-          && get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.uploaderUid == request.auth.uid;
+          && get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.uploaderUid == incoming().uploaderUid
+          && (
+            (isVerifiedUser() && incoming().uploaderUid == request.auth.uid)
+            || isPortalMemberId(incoming().uploaderUid)
+          );
         allow update: if false;
         allow delete: if isValidId(fileId)
           && isValidId(chunkId)

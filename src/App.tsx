@@ -359,19 +359,19 @@ export default function App() {
       }
     });
 
-    const unsubNews = subscribeNewsArticles(effectiveIsAdmin, (articles) => {
+    const unsubNews = subscribeNewsArticles(isFirebaseAdmin, (articles) => {
       setCloudNews(articles);
     });
 
-    const unsubSchedules = subscribeSchedules(effectiveIsAdmin, (scheds) => {
+    const unsubSchedules = subscribeSchedules(isFirebaseAdmin, (scheds) => {
       setCloudSchedules(scheds);
     });
 
-    const unsubMembers = subscribeMembersPublic(effectiveIsAdmin, (memList) => {
+    const unsubMembers = subscribeMembersPublic(isFirebaseAdmin, (memList) => {
       setCloudPublicMembers(memList);
     });
 
-    const unsubWorks = subscribeWorks(effectiveIsAdmin, (workList) => {
+    const unsubWorks = subscribeWorks(isFirebaseAdmin, (workList) => {
       setCloudWorks(workList);
     });
 
@@ -382,7 +382,7 @@ export default function App() {
       unsubMembers();
       unsubWorks();
     };
-  }, [effectiveIsAdmin]);
+  }, [isFirebaseAdmin]);
 
   // Student, Pembina, and Google Auth real-time Cloud Firestore listeners (without requiring Google Sign-In)
   useEffect(() => {
@@ -462,27 +462,30 @@ export default function App() {
     unsubs.push(
       subscribeBlockedWords((words) => {
         setCloudBlockedWords(words);
-      })
+      }, isFirebaseAdmin)
     );
 
     unsubs.push(
-      subscribeUploadedFilesAdmin((summary) => {
-        setCloudStorageSummary(summary);
-        if (summary.status !== lastStorageAlertStatusRef.current) {
-          lastStorageAlertStatusRef.current = summary.status;
-          if (summary.status === 'full') {
-            showToast(
-              `Penyimpanan Cloud Firebase penuh (${summary.usagePercent}%). Hapus file lama di Panel Admin > Database & Penyimpanan.`,
-              'error'
-            );
-          } else if (summary.status === 'warning') {
-            showToast(
-              `Penyimpanan Cloud Firebase hampir penuh (${summary.usagePercent}%). Kelola file di Panel Admin > Database & Penyimpanan.`,
-              'info'
-            );
+      subscribeUploadedFilesAdmin(
+        (summary) => {
+          setCloudStorageSummary(summary);
+          if (summary.status !== lastStorageAlertStatusRef.current) {
+            lastStorageAlertStatusRef.current = summary.status;
+            if (summary.status === 'full') {
+              showToast(
+                `Penyimpanan Cloud Firebase penuh (${summary.usagePercent}%). Hapus file lama di Panel Admin > Database & Penyimpanan.`,
+                'error'
+              );
+            } else if (summary.status === 'warning') {
+              showToast(
+                `Penyimpanan Cloud Firebase hampir penuh (${summary.usagePercent}%). Kelola file di Panel Admin > Database & Penyimpanan.`,
+                'info'
+              );
+            }
           }
-        }
-      })
+        },
+        { isAdmin: isFirebaseAdmin }
+      )
     );
 
     return () => {

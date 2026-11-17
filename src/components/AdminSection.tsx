@@ -1280,6 +1280,7 @@ export function AdminSection({
           status,
           pointsAwarded: nextPoints,
           adminFeedback: feedback,
+          actorMemberId: currentMemberId,
         });
       }
       if (getStoredToken()) {
@@ -1314,7 +1315,7 @@ export function AdminSection({
       const note = reviewNotes[work.id] || '';
       let approvedWork: StudentWork | null = null;
       if ((auth.currentUser || canWriteCloudAdmin) && work.firestoreId) {
-        await reviewWorkInFirestore(work.firestoreId, decision, note);
+        await reviewWorkInFirestore(work.firestoreId, decision, note, currentMemberId);
         if (decision === 'approved') {
           approvedWork = { ...work, approval_status: 'approved', review_note: note };
         }

@@ -317,7 +317,7 @@ export function GallerySection({
     try {
       const nextDisabled = work.comments_disabled ? 0 : 1;
       if (work.firestoreId) {
-        await toggleWorkCommentsInFirestore(work.firestoreId, nextDisabled === 1);
+        await toggleWorkCommentsInFirestore(work.firestoreId, nextDisabled === 1, memberDocId);
       }
       if (getStoredToken()) {
         await apiFetch<{ comments_disabled: number }>(`/api/works/${work.id}/comments-toggle`, {
