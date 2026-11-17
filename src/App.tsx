@@ -5,7 +5,6 @@ import {
   Calendar,
   ClipboardCheck,
   CreditCard,
-  HardDrive,
   Home,
   Image as ImageIcon,
   LogOut,
@@ -31,14 +30,13 @@ import { MembersSection } from './components/MembersSection';
 import { ScheduleSection } from './components/ScheduleSection';
 import { AttendanceHub } from './components/AttendanceHub';
 import { LmsTasksSection } from './components/LmsTasksSection';
-import { GoogleDriveSection } from './components/GoogleDriveSection';
 import { LoginModal } from './components/LoginModal';
 import { NotificationsDrawer } from './components/NotificationsDrawer';
 import { AdminSection } from './components/AdminSection';
 import { NmcLogo } from './components/NmcLogo';
 import { SocialSilhouetteIcon } from './components/SocialSilhouetteIcon';
 
-type MainTab = 'beranda' | 'galeri' | 'anggota' | 'jadwal' | 'tugas' | 'drive' | 'absensi' | 'persetujuan' | 'admin';
+type MainTab = 'beranda' | 'galeri' | 'anggota' | 'jadwal' | 'tugas' | 'absensi' | 'persetujuan' | 'admin';
 
 interface ToastState {
   id: number;
@@ -394,7 +392,6 @@ export default function App() {
                       ],
                     ] as const)
                   : []),
-                ['drive', 'Drive'],
                 ...(isAdmin
                   ? ([
                       ['absensi', 'Absensi'],
@@ -595,8 +592,6 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'drive' && <GoogleDriveSection onToast={showToast} />}
-
             {activeTab === 'absensi' && isAdmin && (
               <AttendanceHub
                 members={members}
@@ -663,9 +658,6 @@ export default function App() {
               <button type="button" onClick={() => navigateTab('anggota')} className="hover:text-[#FACC15] transition-colors">
                 Anggota
               </button>
-              <button type="button" onClick={() => navigateTab('drive')} className="hover:text-[#FACC15] transition-colors">
-                Google Drive
-              </button>
               {currentUser && (
                 <button type="button" onClick={() => navigateTab('tugas')} className="hover:text-[#FACC15] transition-colors">
                   Tugas LMS
@@ -718,7 +710,7 @@ export default function App() {
       {/* Mobile Bottom Tab Bar (Compact 56px, within 15% mobile sticky cap) */}
       <nav
         className={`md:hidden fixed bottom-0 left-0 right-0 z-40 h-14 bg-white/95 backdrop-blur border-t border-slate-200 ${
-          currentUser ? 'flex items-center overflow-x-auto' : 'grid grid-cols-5 items-center'
+          isAdmin ? 'flex items-center overflow-x-auto' : currentUser ? 'grid grid-cols-5 items-center' : 'grid grid-cols-4 items-center'
         } no-print`}
       >
         {(
@@ -728,7 +720,6 @@ export default function App() {
             ['anggota', 'Anggota', Users],
             ['jadwal', 'Jadwal', Calendar],
             ...(currentUser ? ([['tugas', 'Tugas', BookOpen]] as const) : []),
-            ['drive', 'Drive', HardDrive],
             ...(isAdmin
               ? ([
                   ['absensi', 'Absensi', CreditCard],
@@ -745,7 +736,7 @@ export default function App() {
               type="button"
               onClick={() => navigateTab(id)}
               className={`relative flex flex-col items-center justify-center h-full transition-colors ${
-                currentUser ? 'min-w-[68px] flex-1 px-1 shrink-0' : ''
+                isAdmin ? 'min-w-[68px] flex-1 px-1 shrink-0' : ''
               } ${active ? 'text-[#C81E1E]' : 'text-slate-500'}`}
             >
               <Icon className="w-5 h-5" />
@@ -783,7 +774,7 @@ export default function App() {
           if (target.startsWith('profil/')) {
             openMemberProfile(target.replace('profil/', ''));
           } else if (
-            ['beranda', 'galeri', 'anggota', 'jadwal', 'tugas', 'drive', 'absensi', 'persetujuan', 'admin'].includes(target)
+            ['beranda', 'galeri', 'anggota', 'jadwal', 'tugas', 'absensi', 'persetujuan', 'admin'].includes(target)
           ) {
             navigateTab(target as MainTab);
           }
