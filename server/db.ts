@@ -3,19 +3,34 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
+const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-export const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
+export const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
+if (!fs.existsSync(BACKUPS_DIR)) {
+  fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+}
+
+export const UPLOADS_DIR = path.join(PROJECT_ROOT, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-export const db = new Database(path.join(DATA_DIR, 'mmc_smpn2_ciamis.db'));
+export const DB_PATH = path.join(DATA_DIR, 'mmc_smpn2_ciamis.db');
+export const LATEST_BACKUP_PATH = path.join(BACKUPS_DIR, 'mmc_backup_latest.db');
+
+export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = FULL');
+db.pragma('busy_timeout = 5000');
 db.pragma('foreign_keys = ON');
+db.pragma('temp_store = MEMORY');
+db.pragma('wal_autocheckpoint = 100');
+
+let isDbClosed = false;
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -28,6 +43,107 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   if (!salt || !key) return false;
   const derived = crypto.scryptSync(password, salt, 64).toString('hex');
   return crypto.timingSafeEqual(Buffer.from(key, 'hex'), Buffer.from(derived, 'hex'));
+}
+
+export function checkpointDatabase(mode: 'PASSIVE' | 'TRUNCATE' = 'PASSIVE') {
+  if (isDbClosed) return;
+  try {
+    db.pragma(`wal_checkpoint(${mode})`);
+  } catch (err) {
+    console.error('SQLite WAL checkpoint warning:', err);
+  }
+}
+
+export async function createVerifiedBackup(): Promise<string | null> {
+  if (isDbClosed) return null;
+  try {
+    if (!fs.existsSync(BACKUPS_DIR)) {
+      fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+    }
+    const tempPath = path.join(BACKUPS_DIR, `mmc_backup_tmp_${Date.now()}.db`);
+    await db.backup(tempPath);
+    fs.renameSync(tempPath, LATEST_BACKUP_PATH);
+    return LATEST_BACKUP_PATH;
+  } catch (err) {
+    console.error('SQLite backup error:', err);
+    return null;
+  }
+}
+
+export function getDatabaseHealth() {
+  const integrityRow = db.pragma('integrity_check', { simple: true }) as string;
+  const journalMode = db.pragma('journal_mode', { simple: true }) as string;
+  const synchronousMode = db.pragma('synchronous', { simple: true }) as number;
+
+  const safeSize = (filePath: string) => {
+    try {
+      return fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  let lastBackupAt: string | null = null;
+  let lastBackupBytes = 0;
+  try {
+    if (fs.existsSync(LATEST_BACKUP_PATH)) {
+      const stat = fs.statSync(LATEST_BACKUP_PATH);
+      lastBackupAt = new Date(stat.mtimeMs).toISOString();
+      lastBackupBytes = stat.size;
+    }
+  } catch {
+    // ignore
+  }
+
+  const count = (table: string) =>
+    Number((db.prepare(`SELECT COUNT(*) as cnt FROM ${table}`).get() as { cnt: number }).cnt || 0);
+
+  return {
+    integrity: integrityRow,
+    journalMode,
+    synchronous: synchronousMode === 2 ? 'FULL' : synchronousMode === 1 ? 'NORMAL' : String(synchronousMode),
+    dbBytes: safeSize(DB_PATH),
+    walBytes: safeSize(`${DB_PATH}-wal`),
+    shmBytes: safeSize(`${DB_PATH}-shm`),
+    lastBackupAt,
+    lastBackupBytes,
+    counts: {
+      users: count('users'),
+      works: count('works'),
+      attendance_records: count('attendance_records'),
+      lms_tasks: count('lms_tasks'),
+      lms_task_submissions: count('lms_task_submissions'),
+      news_articles: count('news_articles'),
+      schedules: count('schedules'),
+      notifications: count('notifications'),
+      site_settings: count('site_settings'),
+    },
+  };
+}
+
+export function pruneExpiredSessions() {
+  if (isDbClosed) return;
+  try {
+    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(new Date().toISOString());
+  } catch {
+    // ignore
+  }
+}
+
+export function closeDatabaseSafely() {
+  if (isDbClosed) return;
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // ignore
+  }
+  try {
+    db.close();
+  } catch {
+    // ignore
+  } finally {
+    isDbClosed = true;
+  }
 }
 
 export function initDatabase() {
@@ -197,6 +313,13 @@ export function initDatabase() {
       reviewed_at TEXT NOT NULL DEFAULT '',
       UNIQUE (task_id, user_id)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_works_status_created ON works(approval_status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance_records(attendance_date);
+    CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lms_progress_task_user ON lms_task_progress(task_id, user_id);
   `);
 
   // Safe migrations for existing SQLite databases
@@ -216,33 +339,42 @@ export function initDatabase() {
   }
 
   const nowInit = new Date().toISOString();
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('brand_name', 'Multimedia', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', '', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_eyebrow', 'SMP Negeri 2 Ciamis · Ekstrakurikuler Resmi', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_title', 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_description', 'Wadah resmi siswa SMPN 2 Ciamis dalam bidang fotografi, videografi, penyiaran, desain grafis, dan jurnalistik sekolah—dilengkapi arsip karya digital serta sistem absensi kartu pelajar NFC/RFID dan QR Code secara real-time.', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', '', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('footer_address', 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215', ?)`).run(nowInit);
-  db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('social_links', ?, ?)`).run(
-    JSON.stringify([
-      { id: 'ig', platform: 'instagram', label: 'Instagram', url: 'https://instagram.com' },
-      { id: 'tt', platform: 'tiktok', label: 'TikTok', url: 'https://tiktok.com' },
-      { id: 'yt', platform: 'youtube', label: 'YouTube', url: 'https://youtube.com' },
-    ]),
-    nowInit
-  );
+  db.transaction(() => {
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('brand_name', 'Multimedia', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', '', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_eyebrow', 'SMP Negeri 2 Ciamis · Ekstrakurikuler Resmi', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_title', 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_description', 'Wadah resmi siswa SMPN 2 Ciamis dalam bidang fotografi, videografi, penyiaran, desain grafis, dan jurnalistik sekolah—dilengkapi arsip karya digital serta sistem absensi kartu pelajar NFC/RFID dan QR Code secara real-time.', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', '', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('footer_address', 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215', ?)`).run(nowInit);
+    db.prepare(`INSERT OR IGNORE INTO site_settings (key, value, updated_at) VALUES ('social_links', ?, ?)`).run(
+      JSON.stringify([
+        { id: 'ig', platform: 'instagram', label: 'Instagram', url: 'https://instagram.com' },
+        { id: 'tt', platform: 'tiktok', label: 'TikTok', url: 'https://tiktok.com' },
+        { id: 'yt', platform: 'youtube', label: 'YouTube', url: 'https://youtube.com' },
+      ]),
+      nowInit
+    );
 
-  db.prepare(`UPDATE site_settings SET value = 'Multimedia', updated_at = ? WHERE key = 'brand_name' AND value = 'NMC SMPN 2 Ciamis'`).run(nowInit);
-  db.prepare(`UPDATE site_settings SET value = 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis', updated_at = ? WHERE key = 'hero_title' AND value = 'Multimedia Media Center: Ruang Berkarya & Jurnalisme Pelajar'`).run(nowInit);
-  db.prepare(`UPDATE site_settings SET value = 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215', updated_at = ? WHERE key = 'footer_address' AND value = 'Jalan Mr. Iwa Kusumasomantri, Kab. Ciamis, Jawa Barat'`).run(nowInit);
+    db.prepare(`UPDATE site_settings SET value = 'Multimedia', updated_at = ? WHERE key = 'brand_name' AND value = 'NMC SMPN 2 Ciamis'`).run(nowInit);
+    db.prepare(`UPDATE site_settings SET value = 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis', updated_at = ? WHERE key = 'hero_title' AND value = 'Multimedia Media Center: Ruang Berkarya & Jurnalisme Pelajar'`).run(nowInit);
+    db.prepare(`UPDATE site_settings SET value = 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215', updated_at = ? WHERE key = 'footer_address' AND value = 'Jalan Mr. Iwa Kusumasomantri, Kab. Ciamis, Jawa Barat'`).run(nowInit);
 
-  const userCount = (db.prepare('SELECT COUNT(*) as cnt FROM users').get() as { cnt: number }).cnt;
-  if (userCount === 0) {
-    seedInitialData();
+    const userCount = (db.prepare('SELECT COUNT(*) as cnt FROM users').get() as { cnt: number }).cnt;
+    if (userCount === 0) {
+      seedInitialData();
+    }
+
+    ensurePembinaMemberAccounts();
+    ensureSampleLmsTasks();
+  })();
+
+  pruneExpiredSessions();
+  const quickCheck = db.pragma('quick_check', { simple: true });
+  if (quickCheck !== 'ok') {
+    console.error('SQLite quick_check warning:', quickCheck);
   }
-
-  ensurePembinaMemberAccounts();
-  ensureSampleLmsTasks();
+  checkpointDatabase('PASSIVE');
 }
 
 function ensureSampleLmsTasks() {
@@ -354,6 +486,11 @@ function ensureSampleLmsTasks() {
 }
 
 function ensurePembinaMemberAccounts() {
+  const seededFlag = db.prepare(`SELECT value FROM site_settings WHERE key = 'pembina_seeded'`).get() as
+    | { value: string }
+    | undefined;
+  if (seededFlag?.value === '1') return;
+
   const now = new Date().toISOString();
   const pembinaHash = hashPassword('pembina123');
   const pembinaAccounts = [
@@ -407,6 +544,8 @@ function ensurePembinaMemberAccounts() {
       db.prepare(`UPDATE users SET show_in_members = 1 WHERE LOWER(username) = LOWER(?)`).run(p.username);
     }
   }
+
+  db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('pembina_seeded', '1', ?)`).run(now);
 }
 
 function seedInitialData() {

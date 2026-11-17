@@ -1,7 +1,13 @@
 import { useState, type FormEvent } from 'react';
 import { BellRing, Calendar, Clock, MapPin, Plus, Trash2, UserCheck, X } from 'lucide-react';
 import type { ScheduleItem, StudentProfile } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getStoredToken } from '../lib/api';
+import { auth } from '../lib/firebase';
+import {
+  createScheduleInFirestore,
+  deleteScheduleInFirestore,
+  remindScheduleInFirestore,
+} from '../lib/firestoreSync';
 import { formatDateID, getLocalTimeZoneLabel } from '../lib/mediaAssets';
 
 interface ScheduleSectionProps {
@@ -34,9 +40,10 @@ export function ScheduleSection({
     e.preventDefault();
     setSaving(true);
     try {
-      const res = await apiFetch<{ schedule: ScheduleItem }>('/api/schedules', {
-        method: 'POST',
-        body: JSON.stringify({
+      let createdSchedule: ScheduleItem | null = null;
+
+      if (auth.currentUser) {
+        const firestoreId = await createScheduleInFirestore({
           title,
           division,
           event_date: eventDate,
@@ -45,13 +52,52 @@ export function ScheduleSection({
           location,
           mentor,
           description,
-        }),
-      });
-      onScheduleAdded(res.schedule);
+        });
+        createdSchedule = {
+          id: Date.now(),
+          firestoreId,
+          title,
+          division,
+          event_date: eventDate,
+          start_time: startTime,
+          end_time: endTime,
+          location,
+          mentor,
+          description,
+          reminder_sent: 1,
+        };
+      }
+
+      if (getStoredToken()) {
+        try {
+          const res = await apiFetch<{ schedule: ScheduleItem }>('/api/schedules', {
+            method: 'POST',
+            body: JSON.stringify({
+              title,
+              division,
+              event_date: eventDate,
+              start_time: startTime,
+              end_time: endTime,
+              location,
+              mentor,
+              description,
+            }),
+          });
+          if (!createdSchedule) createdSchedule = res.schedule;
+        } catch {
+          if (!createdSchedule) throw new Error('Gagal menambah jadwal.');
+        }
+      }
+
+      if (!createdSchedule) {
+        throw new Error('Masuk sebagai Admin atau hubungkan akun Google Firebase terlebih dahulu.');
+      }
+
+      onScheduleAdded(createdSchedule);
       setShowAddModal(false);
       setTitle('');
       setDescription('');
-      onToast('Jadwal baru ditambahkan dan notifikasi pengingat dikirim ke seluruh siswa.', 'success');
+      onToast('Jadwal baru ditambahkan dan tersinkronisasi untuk seluruh siswa.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menambah jadwal.', 'error');
     } finally {
@@ -61,17 +107,27 @@ export function ScheduleSection({
 
   const handleSendReminder = async (schedule: ScheduleItem) => {
     try {
-      await apiFetch(`/api/schedules/${schedule.id}/remind`, { method: 'POST' });
+      if (auth.currentUser && schedule.firestoreId) {
+        await remindScheduleInFirestore(schedule.firestoreId);
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/schedules/${schedule.id}/remind`, { method: 'POST' }).catch(() => {});
+      }
       onToast(`Pengingat jadwal "${schedule.title}" dikirim real-time ke seluruh peserta didik.`, 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal mengirim pengingat.', 'error');
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (schedule: ScheduleItem) => {
     try {
-      await apiFetch(`/api/schedules/${id}`, { method: 'DELETE' });
-      onScheduleDeleted(id);
+      if (auth.currentUser && schedule.firestoreId) {
+        await deleteScheduleInFirestore(schedule.firestoreId);
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/schedules/${schedule.id}`, { method: 'DELETE' }).catch(() => {});
+      }
+      onScheduleDeleted(schedule.id);
       onToast('Jadwal kegiatan dihapus.', 'info');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menghapus jadwal.', 'error');
@@ -156,7 +212,7 @@ export function ScheduleSection({
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleDelete(item.id)}
+                    onClick={() => handleDelete(item)}
                     aria-label="Hapus jadwal"
                     className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
                   >

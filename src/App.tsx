@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   BookOpen,
   Calendar,
   ClipboardCheck,
+  Cloud,
   CreditCard,
   Home,
   Image as ImageIcon,
@@ -13,6 +14,7 @@ import {
   Users,
 } from 'lucide-react';
 import type {
+  AdminLmsTask,
   AttendanceRecord,
   LmsTask,
   NewsArticle,
@@ -24,6 +26,23 @@ import type {
   WSEvent,
 } from './types';
 import { apiFetch, connectRealtimeSocket, getStoredToken, setStoredToken } from './lib/api';
+import { useFirebase } from './context/FirebaseContext';
+import {
+  deterministicNumericId,
+  sanitizeDocId,
+  seedCloudPortalIfEmpty,
+  subscribeAttendanceRecords,
+  subscribeBlockedWords,
+  subscribeLmsTasks,
+  subscribeMembersPrivateAdmin,
+  subscribeMembersPublic,
+  subscribeNewsArticles,
+  subscribeNotificationsFirestore,
+  subscribePendingWorksAdmin,
+  subscribeSchedules,
+  subscribeSiteSettings,
+  subscribeWorks,
+} from './lib/firestoreSync';
 import { HomeSection } from './components/HomeSection';
 import { GallerySection } from './components/GallerySection';
 import { MembersSection } from './components/MembersSection';
@@ -44,40 +63,76 @@ interface ToastState {
   variant: 'success' | 'error' | 'info';
 }
 
+const DEFAULT_BRANDING: SiteBranding = {
+  brandName: 'Multimedia',
+  logoUrl: '',
+  socialLinks: [
+    { id: 'ig', platform: 'instagram', label: 'Instagram', url: 'https://instagram.com' },
+    { id: 'tt', platform: 'tiktok', label: 'TikTok', url: 'https://tiktok.com' },
+    { id: 'yt', platform: 'youtube', label: 'YouTube', url: 'https://youtube.com' },
+  ],
+};
+
 export default function App() {
+  const { firebaseUser, firebaseAuthReady, isFirebaseAdmin, signOutGoogle } = useFirebase();
+
   const [activeTab, setActiveTab] = useState<MainTab>('beranda');
   const [selectedUsername, setSelectedUsername] = useState<string | null>(null);
   const [selectedWork, setSelectedWork] = useState<StudentWork | null>(null);
 
   const [currentUser, setCurrentUser] = useState<StudentProfile | null>(null);
   const [token, setToken] = useState<string | null>(() => getStoredToken());
-  const [news, setNews] = useState<NewsArticle[]>([]);
-  const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
-  const [members, setMembers] = useState<StudentProfile[]>([]);
-  const [works, setWorks] = useState<StudentWork[]>([]);
-  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
-  const [lmsTasks, setLmsTasks] = useState<LmsTask[]>([]);
-  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [siteBranding, setSiteBranding] = useState<SiteBranding>({
-    brandName: 'Multimedia',
-    logoUrl: '',
-    socialLinks: [
-      { id: 'ig', platform: 'instagram', label: 'Instagram', url: 'https://instagram.com' },
-      { id: 'tt', platform: 'tiktok', label: 'TikTok', url: 'https://tiktok.com' },
-      { id: 'yt', platform: 'youtube', label: 'YouTube', url: 'https://youtube.com' },
-    ],
-  });
 
+  // Local SQLite bootstrap state (fallback before initial cloud seed)
+  const [localNews, setLocalNews] = useState<NewsArticle[]>([]);
+  const [localSchedules, setLocalSchedules] = useState<ScheduleItem[]>([]);
+  const [localMembers, setLocalMembers] = useState<StudentProfile[]>([]);
+  const [localWorks, setLocalWorks] = useState<StudentWork[]>([]);
+  const [localAttendance, setLocalAttendance] = useState<AttendanceRecord[]>([]);
+  const [localLmsTasks, setLocalLmsTasks] = useState<LmsTask[]>([]);
+  const [localNotifications, setLocalNotifications] = useState<NotificationItem[]>([]);
+  const [localBranding, setLocalBranding] = useState<SiteBranding>(DEFAULT_BRANDING);
+  const [localPendingWorksCount, setLocalPendingWorksCount] = useState(0);
+
+  // Cloud Firestore real-time state (authoritative across browsers/devices once seeded)
+  const [cloudSeeded, setCloudSeeded] = useState(false);
+  const [cloudBranding, setCloudBranding] = useState<SiteBranding | null>(null);
+  const [cloudNews, setCloudNews] = useState<NewsArticle[] | null>(null);
+  const [cloudSchedules, setCloudSchedules] = useState<ScheduleItem[] | null>(null);
+  const [cloudPublicMembers, setCloudPublicMembers] = useState<StudentProfile[] | null>(null);
+  const [privateMembersMap, setPrivateMembersMap] = useState<Map<string, { nis: string; nfc_uid: string }>>(
+    () => new Map()
+  );
+  const [cloudWorks, setCloudWorks] = useState<StudentWork[] | null>(null);
+  const [cloudAttendance, setCloudAttendance] = useState<AttendanceRecord[] | null>(null);
+  const [cloudLmsTasks, setCloudLmsTasks] = useState<LmsTask[] | null>(null);
+  const [cloudAdminTasks, setCloudAdminTasks] = useState<AdminLmsTask[] | undefined>(undefined);
+  const [cloudPendingWorks, setCloudPendingWorks] = useState<StudentWork[] | undefined>(undefined);
+  const [cloudBlockedWords, setCloudBlockedWords] = useState<
+    Array<{ id: number; firestoreId?: string; word: string }> | undefined
+  >(undefined);
+  const [cloudNotifications, setCloudNotifications] = useState<NotificationItem[] | null>(null);
+
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [latestAttendanceEvent, setLatestAttendanceEvent] = useState<AttendanceRecord | null>(null);
 
   const [loginOpen, setLoginOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
-  const [pendingWorksCount, setPendingWorksCount] = useState(0);
   const [pendingRefreshKey, setPendingRefreshKey] = useState(0);
   const [toast, setToast] = useState<ToastState | null>(null);
+
+  const bootstrapRef = useRef<{
+    siteSettings: SiteBranding;
+    news: NewsArticle[];
+    schedules: ScheduleItem[];
+    members: StudentProfile[];
+    works: StudentWork[];
+    lmsTasks?: LmsTask[];
+  } | null>(null);
+  const autoSeedAttemptedRef = useRef(false);
+  const [bootstrapReady, setBootstrapReady] = useState(false);
 
   const showToast = useCallback((message: string, variant: 'success' | 'error' | 'info' = 'info') => {
     const id = Date.now();
@@ -100,22 +155,32 @@ export default function App() {
         siteSettings?: SiteBranding;
       }>('/api/bootstrap');
 
+      bootstrapRef.current = {
+        siteSettings: data.siteSettings || DEFAULT_BRANDING,
+        news: data.news,
+        schedules: data.schedules,
+        members: data.members,
+        works: data.works,
+        lmsTasks: data.lmsTasks,
+      };
+      setBootstrapReady(true);
+
       setCurrentUser(data.user);
-      setNews(data.news);
-      setSchedules(data.schedules);
-      setMembers(data.members);
-      setWorks(data.works);
-      setAttendanceRecords(data.attendance);
-      setLmsTasks(data.lmsTasks || []);
+      setLocalNews(data.news);
+      setLocalSchedules(data.schedules);
+      setLocalMembers(data.members);
+      setLocalWorks(data.works);
+      setLocalAttendance(data.attendance);
+      setLocalLmsTasks(data.lmsTasks || []);
       if (data.siteSettings) {
-        setSiteBranding(data.siteSettings);
+        setLocalBranding(data.siteSettings);
       }
       if (!data.user && getStoredToken()) {
         setStoredToken(null);
         setToken(null);
       }
     } catch {
-      // ignore
+      // ignore if backend unavailable; Firestore listeners handle cloud state
     } finally {
       setLoading(false);
     }
@@ -123,12 +188,12 @@ export default function App() {
 
   const loadLmsTasks = useCallback(async () => {
     if (!getStoredToken()) {
-      setLmsTasks([]);
+      setLocalLmsTasks([]);
       return;
     }
     try {
       const res = await apiFetch<{ tasks: LmsTask[]; totalPoints: number }>('/api/tasks');
-      setLmsTasks(res.tasks);
+      setLocalLmsTasks(res.tasks);
       setCurrentUser((prev) => (prev ? { ...prev, lms_points: res.totalPoints } : prev));
     } catch {
       // ignore
@@ -137,27 +202,27 @@ export default function App() {
 
   const loadNotifications = useCallback(async () => {
     if (!getStoredToken()) {
-      setNotifications([]);
+      setLocalNotifications([]);
       return;
     }
     try {
       const res = await apiFetch<{ notifications: NotificationItem[] }>('/api/notifications');
-      setNotifications(res.notifications);
+      setLocalNotifications(res.notifications);
     } catch {
-      setNotifications([]);
+      setLocalNotifications([]);
     }
   }, []);
 
   const loadPendingCount = useCallback(async () => {
     if (!getStoredToken()) {
-      setPendingWorksCount(0);
+      setLocalPendingWorksCount(0);
       return;
     }
     try {
       const res = await apiFetch<{ works: StudentWork[] }>('/api/admin/works/pending');
-      setPendingWorksCount(res.works.length);
+      setLocalPendingWorksCount(res.works.length);
     } catch {
-      setPendingWorksCount(0);
+      setLocalPendingWorksCount(0);
     }
   }, []);
 
@@ -171,13 +236,231 @@ export default function App() {
       if (currentUser.role === 'admin') {
         loadPendingCount();
       } else {
-        setPendingWorksCount(0);
+        setLocalPendingWorksCount(0);
       }
     } else {
-      setNotifications([]);
-      setPendingWorksCount(0);
+      setLocalNotifications([]);
+      setLocalPendingWorksCount(0);
     }
   }, [currentUser, loadNotifications, loadPendingCount]);
+
+  // Public Cloud Firestore real-time subscriptions (syncs across all devices/browsers)
+  useEffect(() => {
+    const unsubSettings = subscribeSiteSettings((settings) => {
+      if (settings) {
+        setCloudSeeded(true);
+        setCloudBranding(settings);
+        setLoading(false);
+      } else {
+        setCloudSeeded(false);
+        setCloudBranding(null);
+      }
+    });
+
+    const unsubNews = subscribeNewsArticles(isFirebaseAdmin, (articles) => {
+      setCloudNews(articles);
+    });
+
+    const unsubSchedules = subscribeSchedules(isFirebaseAdmin, (scheds) => {
+      setCloudSchedules(scheds);
+    });
+
+    const unsubMembers = subscribeMembersPublic(isFirebaseAdmin, (memList) => {
+      setCloudPublicMembers(memList);
+    });
+
+    const unsubWorks = subscribeWorks(isFirebaseAdmin, (workList) => {
+      setCloudWorks(workList);
+    });
+
+    return () => {
+      unsubSettings();
+      unsubNews();
+      unsubSchedules();
+      unsubMembers();
+      unsubWorks();
+    };
+  }, [isFirebaseAdmin]);
+
+  // Authenticated Cloud Firestore listeners (LMS Tasks, Attendance, Notifications)
+  useEffect(() => {
+    if (!firebaseUser?.uid) {
+      setCloudAttendance(null);
+      setCloudLmsTasks(null);
+      setCloudAdminTasks(undefined);
+      setCloudNotifications(null);
+      return;
+    }
+
+    const uid = firebaseUser.uid;
+    const unsubAtt = subscribeAttendanceRecords(isFirebaseAdmin, uid, (records) => {
+      setCloudAttendance(records);
+    });
+
+    const unsubLms = subscribeLmsTasks(isFirebaseAdmin, uid, (tasks, adminTasks) => {
+      setCloudLmsTasks(tasks);
+      setCloudAdminTasks(isFirebaseAdmin ? adminTasks : undefined);
+    });
+
+    const unsubNotifs = subscribeNotificationsFirestore(isFirebaseAdmin, uid, (notifs) => {
+      setCloudNotifications(notifs);
+    });
+
+    return () => {
+      unsubAtt();
+      unsubLms();
+      unsubNotifs();
+    };
+  }, [firebaseUser?.uid, isFirebaseAdmin]);
+
+  // Admin-only Cloud Firestore listeners (PII NIS/NFC, Pending Works, Blocked Words)
+  useEffect(() => {
+    if (!firebaseUser?.uid || !isFirebaseAdmin) {
+      setPrivateMembersMap(new Map());
+      setCloudPendingWorks(undefined);
+      setCloudBlockedWords(undefined);
+      return;
+    }
+
+    const unsubPriv = subscribeMembersPrivateAdmin((map) => {
+      setPrivateMembersMap(map);
+    });
+    const unsubPending = subscribePendingWorksAdmin((pendingList) => {
+      setCloudPendingWorks(pendingList);
+    });
+    const unsubBlocked = subscribeBlockedWords((words) => {
+      setCloudBlockedWords(words);
+    });
+
+    return () => {
+      unsubPriv();
+      unsubPending();
+      unsubBlocked();
+    };
+  }, [firebaseUser?.uid, isFirebaseAdmin]);
+
+  // Auto-seed Cloud Firestore once when the Admin signs in with Google
+  useEffect(() => {
+    if (!firebaseAuthReady || !isFirebaseAdmin || cloudSeeded || !bootstrapReady || !bootstrapRef.current) {
+      return;
+    }
+    if (autoSeedAttemptedRef.current) return;
+    autoSeedAttemptedRef.current = true;
+
+    seedCloudPortalIfEmpty(bootstrapRef.current)
+      .then((didSeed) => {
+        if (didSeed) {
+          setCloudSeeded(true);
+          showToast('Database Cloud Firestore berhasil diinisialisasi & disinkronkan!', 'success');
+        }
+      })
+      .catch(() => {
+        autoSeedAttemptedRef.current = false;
+      });
+  }, [firebaseAuthReady, isFirebaseAdmin, cloudSeeded, bootstrapReady, showToast]);
+
+  const handleSyncCloudNow = useCallback(async () => {
+    if (!isFirebaseAdmin) {
+      showToast('Masuk dengan akun Google Admin (NedacisMC@gmail.com) untuk sinkronisasi cloud.', 'error');
+      return;
+    }
+    const payload = bootstrapRef.current || {
+      siteSettings: localBranding,
+      news: localNews,
+      schedules: localSchedules,
+      members: localMembers,
+      works: localWorks,
+      lmsTasks: localLmsTasks,
+    };
+    const didSeed = await seedCloudPortalIfEmpty(payload);
+    if (didSeed) {
+      setCloudSeeded(true);
+      showToast('Data awal portal berhasil diunggah ke Cloud Firestore.', 'success');
+    } else {
+      showToast('Cloud Firestore sudah aktif dan tersinkronisasi real-time di semua perangkat.', 'info');
+    }
+  }, [isFirebaseAdmin, localBranding, localNews, localSchedules, localMembers, localWorks, localLmsTasks, showToast]);
+
+  // Merged effective data (Cloud Firestore overrides local bootstrap once seeded)
+  const siteBranding = cloudBranding ?? localBranding;
+  const news = cloudSeeded && cloudNews !== null ? cloudNews : localNews;
+  const schedules = cloudSeeded && cloudSchedules !== null ? cloudSchedules : localSchedules;
+  const works = cloudSeeded && cloudWorks !== null ? cloudWorks : localWorks;
+
+  const rawMembers = cloudSeeded && cloudPublicMembers !== null ? cloudPublicMembers : localMembers;
+  const members = useMemo(() => {
+    if (privateMembersMap.size === 0) return rawMembers;
+    return rawMembers.map((m) => {
+      const key = m.firestoreId || sanitizeDocId(`member_${m.username}`);
+      const priv = privateMembersMap.get(key);
+      if (!priv) return m;
+      return {
+        ...m,
+        nis: priv.nis || m.nis,
+        nfc_uid: priv.nfc_uid || m.nfc_uid,
+      };
+    });
+  }, [rawMembers, privateMembersMap]);
+
+  const attendanceRecords = firebaseUser && cloudAttendance !== null ? cloudAttendance : localAttendance;
+  const lmsTasks = firebaseUser && cloudLmsTasks !== null ? cloudLmsTasks : localLmsTasks;
+  const notifications = firebaseUser && cloudNotifications !== null ? cloudNotifications : localNotifications;
+  const pendingWorksCount =
+    isFirebaseAdmin && cloudPendingWorks !== undefined ? cloudPendingWorks.length : localPendingWorksCount;
+
+  // Synthesize effectiveUser from local session OR authenticated Firebase Google session
+  const effectiveUser = useMemo<StudentProfile | null>(() => {
+    const cloudPoints = lmsTasks.reduce(
+      (sum, t) => sum + (t.submission?.status === 'approved' ? t.submission.points_awarded || 0 : 0),
+      0
+    );
+    if (currentUser) {
+      return {
+        ...currentUser,
+        role: isFirebaseAdmin ? 'admin' : currentUser.role,
+        lms_points: firebaseUser && cloudLmsTasks !== null ? cloudPoints : currentUser.lms_points,
+      };
+    }
+    if (firebaseUser) {
+      const emailPrefix = (firebaseUser.email?.split('@')[0] || 'pengguna')
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]/g, '_');
+      const matched = members.find(
+        (m) =>
+          (isFirebaseAdmin && m.role === 'admin' && m.show_in_members === 0) ||
+          m.username.toLowerCase() === emailPrefix
+      );
+      if (matched) {
+        return {
+          ...matched,
+          role: isFirebaseAdmin ? 'admin' : matched.role,
+          avatar_url: matched.avatar_url || firebaseUser.photoURL || '',
+          lms_points: cloudLmsTasks !== null ? cloudPoints : matched.lms_points,
+        };
+      }
+      return {
+        id: deterministicNumericId(firebaseUser.uid),
+        firestoreId: sanitizeDocId(`user_${firebaseUser.uid}`),
+        username: emailPrefix,
+        role: isFirebaseAdmin ? 'admin' : 'student',
+        full_name: firebaseUser.displayName || firebaseUser.email || 'Pengguna Google',
+        nis: '',
+        kelas: isFirebaseAdmin ? 'Pembina' : 'Anggota',
+        division: isFirebaseAdmin ? 'Pembina' : 'Fotografi',
+        bio: 'Akun terhubung ke Cloud Firestore.',
+        nfc_uid: '',
+        qr_code_token: `MMC-FB-${firebaseUser.uid.slice(0, 8).toUpperCase()}`,
+        avatar_color: isFirebaseAdmin ? '#B91C1C' : '#1D4ED8',
+        avatar_url: firebaseUser.photoURL || '',
+        show_in_members: 0,
+        created_at: new Date().toISOString(),
+        lms_points: cloudPoints,
+      };
+    }
+    return null;
+  }, [currentUser, firebaseUser, isFirebaseAdmin, members, lmsTasks, cloudLmsTasks]);
+
+  const effectiveIsAdmin = effectiveUser?.role === 'admin' || isFirebaseAdmin;
 
   // Hash routing for QR Code profile deep-linking (#profil/username)
   useEffect(() => {
@@ -194,7 +477,7 @@ export default function App() {
     return () => window.removeEventListener('hashchange', applyHashRoute);
   }, []);
 
-  // Real-time WebSocket event handling
+  // Real-time WebSocket event handling (local Express fallback)
   useEffect(() => {
     const cleanup = connectRealtimeSocket(
       token,
@@ -202,7 +485,7 @@ export default function App() {
         if (event.type === 'attendance:recorded') {
           const rec = event.payload;
           setLatestAttendanceEvent(rec);
-          setAttendanceRecords((prev) => {
+          setLocalAttendance((prev) => {
             const existsIdx = prev.findIndex(
               (r) => r.user_id === rec.user_id && r.attendance_date === rec.attendance_date
             );
@@ -211,14 +494,14 @@ export default function App() {
             }
             return [rec, ...prev];
           });
-          setMembers((prev) =>
+          setLocalMembers((prev) =>
             prev.map((m) =>
               m.id === rec.user_id ? { ...m, attendance_count: (m.attendance_count ?? 0) + 1 } : m
             )
           );
         } else if (event.type === 'notification:new') {
           const notif = event.payload;
-          setNotifications((prev) => {
+          setLocalNotifications((prev) => {
             if (prev.some((n) => n.id === notif.id)) return prev;
             return [notif, ...prev];
           });
@@ -231,20 +514,20 @@ export default function App() {
           }
         } else if (event.type === 'work:created') {
           const work = event.payload;
-          setWorks((prev) => (prev.some((w) => w.id === work.id) ? prev : [work, ...prev]));
+          setLocalWorks((prev) => (prev.some((w) => w.id === work.id) ? prev : [work, ...prev]));
           setPendingRefreshKey((k) => k + 1);
         } else if (event.type === 'work:deleted') {
           const { id } = event.payload;
-          setWorks((prev) => prev.filter((w) => w.id !== id));
+          setLocalWorks((prev) => prev.filter((w) => w.id !== id));
           setSelectedWork((prev) => (prev?.id === id ? null : prev));
           setPendingRefreshKey((k) => k + 1);
         } else if (event.type === 'work:updated') {
           const patch = event.payload;
-          setWorks((prev) => prev.map((w) => (w.id === patch.id ? { ...w, ...patch } : w)));
+          setLocalWorks((prev) => prev.map((w) => (w.id === patch.id ? { ...w, ...patch } : w)));
           setSelectedWork((prev) => (prev?.id === patch.id ? { ...prev, ...patch } : prev));
         } else if (event.type === 'comment:created') {
           const c = event.payload;
-          setWorks((prev) =>
+          setLocalWorks((prev) =>
             prev.map((w) => {
               if (w.id !== c.work_id) return w;
               const existing = w.comments || [];
@@ -260,7 +543,7 @@ export default function App() {
           });
         } else if (event.type === 'comment:deleted') {
           const { id, work_id } = event.payload;
-          setWorks((prev) =>
+          setLocalWorks((prev) =>
             prev.map((w) =>
               w.id === work_id ? { ...w, comments: (w.comments || []).filter((c) => c.id !== id) } : w
             )
@@ -272,19 +555,19 @@ export default function App() {
           );
         } else if (event.type === 'schedule:created') {
           const sched = event.payload;
-          setSchedules((prev) => (prev.some((s) => s.id === sched.id) ? prev : [...prev, sched]));
+          setLocalSchedules((prev) => (prev.some((s) => s.id === sched.id) ? prev : [...prev, sched]));
         } else if (event.type === 'settings:updated') {
-          setSiteBranding(event.payload);
+          setLocalBranding(event.payload);
         } else if (event.type === 'member:updated') {
           const { id, avatar_url } = event.payload;
-          setMembers((prev) => prev.map((m) => (m.id === id ? { ...m, avatar_url } : m)));
-          setWorks((prev) =>
+          setLocalMembers((prev) => prev.map((m) => (m.id === id ? { ...m, avatar_url } : m)));
+          setLocalWorks((prev) =>
             prev.map((w) => (w.user_id === id ? { ...w, author_avatar_url: avatar_url } : w))
           );
           setCurrentUser((prev) => (prev && prev.id === id ? { ...prev, avatar_url } : prev));
         } else if (event.type === 'member:points_updated') {
           const { id, lms_points } = event.payload;
-          setMembers((prev) => prev.map((m) => (m.id === id ? { ...m, lms_points } : m)));
+          setLocalMembers((prev) => prev.map((m) => (m.id === id ? { ...m, lms_points } : m)));
           setCurrentUser((prev) => (prev && prev.id === id ? { ...prev, lms_points } : prev));
         } else if (
           event.type === 'task:created' ||
@@ -299,26 +582,25 @@ export default function App() {
       setWsConnected
     );
     return cleanup;
-  }, [token, currentUser, showToast, loadLmsTasks]);
+  }, [token, currentUser, showToast, loadLmsTasks, loadPendingCount]);
 
-  const isAdmin = currentUser?.role === 'admin';
   const isAdminOnlyTab = (t: MainTab) => t === 'absensi' || t === 'persetujuan' || t === 'admin';
 
   useEffect(() => {
-    if (!loading && isAdminOnlyTab(activeTab) && !isAdmin) {
+    if (!loading && firebaseAuthReady && isAdminOnlyTab(activeTab) && !effectiveIsAdmin) {
       setActiveTab('beranda');
     }
-    if (!loading && activeTab === 'tugas' && !currentUser) {
+    if (!loading && firebaseAuthReady && activeTab === 'tugas' && !effectiveUser) {
       setActiveTab('beranda');
     }
-  }, [activeTab, isAdmin, currentUser, loading]);
+  }, [activeTab, effectiveIsAdmin, effectiveUser, loading, firebaseAuthReady]);
 
   const navigateTab = (tab: MainTab) => {
-    if (isAdminOnlyTab(tab) && !isAdmin) {
+    if (isAdminOnlyTab(tab) && !effectiveIsAdmin) {
       showToast('Menu ini hanya dapat diakses oleh Pembina / Admin.', 'error');
       return;
     }
-    if (tab === 'tugas' && !currentUser) {
+    if (tab === 'tugas' && !effectiveUser) {
       setLoginOpen(true);
       showToast('Silakan masuk akun terlebih dahulu untuk mengakses Tugas LMS.', 'info');
       return;
@@ -339,13 +621,14 @@ export default function App() {
 
   const handleLogout = async () => {
     await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    await signOutGoogle().catch(() => {});
     setStoredToken(null);
     setToken(null);
     setCurrentUser(null);
-    setAttendanceRecords([]);
-    setLmsTasks([]);
-    setNotifications([]);
-    setPendingWorksCount(0);
+    setLocalAttendance([]);
+    setLocalLmsTasks([]);
+    setLocalNotifications([]);
+    setLocalPendingWorksCount(0);
     if (isAdminOnlyTab(activeTab) || activeTab === 'tugas') {
       setActiveTab('beranda');
     }
@@ -354,7 +637,8 @@ export default function App() {
 
   const handleMarkAllRead = async () => {
     await apiFetch('/api/notifications/read', { method: 'POST' }).catch(() => {});
-    setNotifications((prev) => prev.map((n) => ({ ...n, is_read: 1 })));
+    setLocalNotifications((prev) => prev.map((n) => ({ ...n, is_read: 1 })));
+    setCloudNotifications((prev) => (prev ? prev.map((n) => ({ ...n, is_read: 1 })) : prev));
   };
 
   const unreadCount = notifications.filter((n) => n.is_read === 0).length;
@@ -384,7 +668,7 @@ export default function App() {
                 ['galeri', 'Galeri'],
                 ['anggota', 'Anggota'],
                 ['jadwal', 'Jadwal'],
-                ...(currentUser
+                ...(effectiveUser
                   ? ([
                       [
                         'tugas',
@@ -392,7 +676,7 @@ export default function App() {
                       ],
                     ] as const)
                   : []),
-                ...(isAdmin
+                ...(effectiveIsAdmin
                   ? ([
                       ['absensi', 'Absensi'],
                       [
@@ -421,8 +705,20 @@ export default function App() {
 
           {/* Zone 3: Primary Action */}
           <div className="flex items-center gap-2 shrink-0">
-            {currentUser ? (
+            {effectiveUser ? (
               <>
+                {!firebaseUser && (
+                  <button
+                    type="button"
+                    onClick={() => setLoginOpen(true)}
+                    title="Hubungkan Akun Google untuk Sinkronisasi Cloud"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-white/95 bg-white/15 hover:bg-white/25 rounded-xl transition-colors min-h-[40px] whitespace-nowrap"
+                  >
+                    <Cloud className="w-4 h-4 shrink-0" />
+                    <span className="hidden lg:inline">Sync Cloud</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setNotifOpen(true)}
@@ -435,7 +731,7 @@ export default function App() {
                   )}
                 </button>
 
-                {currentUser.role === 'admin' ? (
+                {effectiveIsAdmin ? (
                   <button
                     type="button"
                     onClick={() => navigateTab('admin')}
@@ -451,11 +747,11 @@ export default function App() {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => openMemberProfile(currentUser.username)}
+                    onClick={() => openMemberProfile(effectiveUser.username)}
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs sm:text-sm font-semibold text-amber-950 bg-[#FACC15] hover:bg-[#FDE047] rounded-xl transition-colors min-h-[40px] whitespace-nowrap max-w-[150px]"
                   >
                     <User className="w-4 h-4 shrink-0" />
-                    <span className="truncate">{currentUser.full_name.split(' ')[0]}</span>
+                    <span className="truncate">{effectiveUser.full_name.split(' ')[0]}</span>
                   </button>
                 )}
 
@@ -497,9 +793,9 @@ export default function App() {
                 works={works}
                 memberCount={members.filter((m) => m.role === 'student').length}
                 siteBranding={siteBranding}
-                currentUser={currentUser}
+                currentUser={effectiveUser}
                 lmsTasks={lmsTasks}
-                isAdmin={isAdmin}
+                isAdmin={effectiveIsAdmin}
                 onNavigate={navigateTab}
                 onOpenWork={(w) => {
                   setActiveTab('galeri');
@@ -511,15 +807,17 @@ export default function App() {
             {activeTab === 'galeri' && (
               <GallerySection
                 works={works}
-                currentUser={currentUser}
+                currentUser={effectiveUser}
                 selectedWork={selectedWork}
                 onSelectWork={setSelectedWork}
                 onOpenMemberProfile={openMemberProfile}
                 onRequireLogin={() => setLoginOpen(true)}
-                onWorkCreated={(w) => setWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]))}
-                onWorkDeleted={(id) => setWorks((prev) => prev.filter((x) => x.id !== id))}
+                onWorkCreated={(w) =>
+                  setLocalWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]))
+                }
+                onWorkDeleted={(id) => setLocalWorks((prev) => prev.filter((x) => x.id !== id))}
                 onWorkPatch={(id, patch) => {
-                  setWorks((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
+                  setLocalWorks((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
                   setSelectedWork((prev) => (prev?.id === id ? { ...prev, ...patch } : prev));
                 }}
                 onToast={showToast}
@@ -529,7 +827,9 @@ export default function App() {
             {activeTab === 'anggota' && (
               <MembersSection
                 members={members}
-                currentUser={currentUser}
+                allWorks={works}
+                allAttendance={attendanceRecords}
+                currentUser={effectiveUser}
                 lmsTasks={lmsTasks}
                 selectedUsername={selectedUsername}
                 onSelectUsername={(uname) => {
@@ -548,12 +848,12 @@ export default function App() {
                 }}
                 onUserUpdated={(updatedUser) => {
                   setCurrentUser(updatedUser);
-                  setMembers((prev) =>
+                  setLocalMembers((prev) =>
                     prev.map((m) => (m.id === updatedUser.id ? { ...m, avatar_url: updatedUser.avatar_url } : m))
                   );
                 }}
                 onWorkApprovedOrAdminCreated={(w) =>
-                  setWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]))
+                  setLocalWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]))
                 }
                 onToast={showToast}
                 latestAttendanceEvent={latestAttendanceEvent}
@@ -563,27 +863,32 @@ export default function App() {
             {activeTab === 'jadwal' && (
               <ScheduleSection
                 schedules={schedules}
-                currentUser={currentUser}
-                onScheduleAdded={(s) => setSchedules((prev) => (prev.some((x) => x.id === s.id) ? prev : [...prev, s]))}
-                onScheduleDeleted={(id) => setSchedules((prev) => prev.filter((s) => s.id !== id))}
+                currentUser={effectiveUser}
+                onScheduleAdded={(s) =>
+                  setLocalSchedules((prev) => (prev.some((x) => x.id === s.id) ? prev : [...prev, s]))
+                }
+                onScheduleDeleted={(id) => setLocalSchedules((prev) => prev.filter((s) => s.id !== id))}
                 onToast={showToast}
               />
             )}
 
-            {activeTab === 'tugas' && currentUser && (
+            {activeTab === 'tugas' && effectiveUser && (
               <LmsTasksSection
-                currentUser={currentUser}
+                currentUser={effectiveUser}
                 tasks={lmsTasks}
                 initialSelectedTaskId={selectedTaskId}
                 onTaskUpdated={(updatedTask, newTotalPoints) => {
-                  setLmsTasks((prev) =>
+                  setLocalLmsTasks((prev) =>
                     prev.map((t) => (t.id === updatedTask.id ? updatedTask : t))
+                  );
+                  setCloudLmsTasks((prev) =>
+                    prev ? prev.map((t) => (t.id === updatedTask.id ? updatedTask : t)) : prev
                   );
                   if (newTotalPoints !== undefined) {
                     setCurrentUser((prev) => (prev ? { ...prev, lms_points: newTotalPoints } : prev));
-                    setMembers((prev) =>
+                    setLocalMembers((prev) =>
                       prev.map((m) =>
-                        m.id === currentUser.id ? { ...m, lms_points: newTotalPoints } : m
+                        m.id === effectiveUser.id ? { ...m, lms_points: newTotalPoints } : m
                       )
                     );
                   }
@@ -592,15 +897,15 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'absensi' && isAdmin && (
+            {activeTab === 'absensi' && effectiveIsAdmin && (
               <AttendanceHub
                 members={members}
                 attendanceRecords={attendanceRecords}
-                currentUser={currentUser}
-                wsConnected={wsConnected}
+                currentUser={effectiveUser}
+                wsConnected={wsConnected || Boolean(firebaseUser)}
                 onAttendanceRecorded={(rec) => {
                   setLatestAttendanceEvent(rec);
-                  setAttendanceRecords((prev) => {
+                  setLocalAttendance((prev) => {
                     const idx = prev.findIndex(
                       (r) => r.user_id === rec.user_id && r.attendance_date === rec.attendance_date
                     );
@@ -613,18 +918,28 @@ export default function App() {
               />
             )}
 
-            {(activeTab === 'persetujuan' || activeTab === 'admin') && isAdmin && (
+            {(activeTab === 'persetujuan' || activeTab === 'admin') && effectiveIsAdmin && (
               <AdminSection
                 mode={activeTab === 'persetujuan' ? 'approval' : 'admin'}
                 members={members}
                 siteBranding={siteBranding}
                 pendingRefreshKey={pendingRefreshKey}
-                onPendingCountChange={setPendingWorksCount}
-                onBrandingUpdated={setSiteBranding}
+                cloudAdminTasks={cloudAdminTasks}
+                cloudPendingWorks={cloudPendingWorks}
+                cloudBlockedWords={cloudBlockedWords}
+                isFirebaseAdmin={isFirebaseAdmin}
+                firebaseEmail={firebaseUser?.email ?? null}
+                cloudSeeded={cloudSeeded}
+                onSyncCloudNow={handleSyncCloudNow}
+                onPendingCountChange={setLocalPendingWorksCount}
+                onBrandingUpdated={(b) => {
+                  setLocalBranding(b);
+                  if (cloudSeeded) setCloudBranding(b);
+                }}
                 onMembersChanged={loadBootstrap}
-                onNewsCreated={(article) => setNews((prev) => [article, ...prev])}
+                onNewsCreated={(article) => setLocalNews((prev) => [article, ...prev])}
                 onWorkApproved={(work) => {
-                  setWorks((prev) => (prev.some((w) => w.id === work.id) ? prev : [work, ...prev]));
+                  setLocalWorks((prev) => (prev.some((w) => w.id === work.id) ? prev : [work, ...prev]));
                   loadBootstrap();
                 }}
                 onTasksChanged={loadLmsTasks}
@@ -658,12 +973,12 @@ export default function App() {
               <button type="button" onClick={() => navigateTab('anggota')} className="hover:text-[#FACC15] transition-colors">
                 Anggota
               </button>
-              {currentUser && (
+              {effectiveUser && (
                 <button type="button" onClick={() => navigateTab('tugas')} className="hover:text-[#FACC15] transition-colors">
                   Tugas LMS
                 </button>
               )}
-              {isAdmin && (
+              {effectiveIsAdmin && (
                 <>
                   <button type="button" onClick={() => navigateTab('absensi')} className="hover:text-[#FACC15] transition-colors">
                     Absensi NFC &amp; QR
@@ -710,7 +1025,7 @@ export default function App() {
       {/* Mobile Bottom Tab Bar (Compact 56px, within 15% mobile sticky cap) */}
       <nav
         className={`md:hidden fixed bottom-0 left-0 right-0 z-40 h-14 bg-white/95 backdrop-blur border-t border-slate-200 ${
-          isAdmin ? 'flex items-center overflow-x-auto' : currentUser ? 'grid grid-cols-5 items-center' : 'grid grid-cols-4 items-center'
+          effectiveIsAdmin ? 'flex items-center overflow-x-auto' : effectiveUser ? 'grid grid-cols-5 items-center' : 'grid grid-cols-4 items-center'
         } no-print`}
       >
         {(
@@ -719,8 +1034,8 @@ export default function App() {
             ['galeri', 'Galeri', ImageIcon],
             ['anggota', 'Anggota', Users],
             ['jadwal', 'Jadwal', Calendar],
-            ...(currentUser ? ([['tugas', 'Tugas', BookOpen]] as const) : []),
-            ...(isAdmin
+            ...(effectiveUser ? ([['tugas', 'Tugas', BookOpen]] as const) : []),
+            ...(effectiveIsAdmin
               ? ([
                   ['absensi', 'Absensi', CreditCard],
                   ['persetujuan', 'Persetujuan', ClipboardCheck],
@@ -736,7 +1051,7 @@ export default function App() {
               type="button"
               onClick={() => navigateTab(id)}
               className={`relative flex flex-col items-center justify-center h-full transition-colors ${
-                isAdmin ? 'min-w-[68px] flex-1 px-1 shrink-0' : ''
+                effectiveIsAdmin ? 'min-w-[68px] flex-1 px-1 shrink-0' : ''
               } ${active ? 'text-[#C81E1E]' : 'text-slate-500'}`}
             >
               <Icon className="w-5 h-5" />
@@ -761,6 +1076,14 @@ export default function App() {
           setToken(newToken);
           loadBootstrap();
           showToast(`Selamat datang, ${user.full_name}.`, 'success');
+        }}
+        onGoogleLoginSuccess={(email) => {
+          showToast(
+            email
+              ? `Terhubung ke Cloud Firestore dengan ${email}.`
+              : 'Berhasil masuk dengan akun Google.',
+            'success'
+          );
         }}
       />
 

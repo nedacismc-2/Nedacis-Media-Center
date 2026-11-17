@@ -1,0 +1,389 @@
+{
+  "entities": {
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Trusted marker document granting Firestore admin privileges to a verified Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "grantedBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "grantedBy", "createdAt"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Private Firebase Auth user profile and optional link to a school MMC member record.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "role": { "type": "string", "enum": ["member", "admin"] },
+        "linkedMemberId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "SocialLink": {
+      "title": "SocialLink",
+      "description": "Official social media link shown in the portal footer.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "platform": { "type": "string", "enum": ["instagram", "tiktok", "youtube", "facebook", "x", "website", "custom"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "url": { "type": "string", "maxLength": 300 },
+        "customIconUrl": { "type": "string", "maxLength": 500 }
+      },
+      "required": ["id", "platform", "label", "url"]
+    },
+    "SiteSettingsPortal": {
+      "title": "SiteSettingsPortal",
+      "description": "Public portal branding, hero editorial copy, footer school address, and social links.",
+      "type": "object",
+      "properties": {
+        "brandName": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "logoUrl": { "type": "string", "maxLength": 500 },
+        "heroEyebrow": { "type": "string", "maxLength": 120 },
+        "heroTitle": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "heroDescription": { "type": "string", "maxLength": 600 },
+        "heroImageUrl": { "type": "string", "maxLength": 500 },
+        "footerAddress": { "type": "string", "maxLength": 200 },
+        "socialLinks": { "type": "array", "description": "Bounded up to 12 social media links." },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["brandName", "heroTitle", "footerAddress", "socialLinks", "updatedByUid", "updatedAt"]
+    },
+    "MemberPublic": {
+      "title": "MemberPublic",
+      "description": "Non-PII public member card displayed in the Anggota directory and profile modal.",
+      "type": "object",
+      "properties": {
+        "legacyId": { "type": "number" },
+        "username": { "type": "string", "minLength": 2, "maxLength": 60, "pattern": "^[a-zA-Z0-9._-]+$" },
+        "role": { "type": "string", "enum": ["admin", "student"] },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "kelas": { "type": "string", "minLength": 1, "maxLength": 30 },
+        "division": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "bio": { "type": "string", "maxLength": 400 },
+        "qrCodeToken": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "avatarColor": { "type": "string", "minLength": 4, "maxLength": 16 },
+        "avatarUrl": { "type": "string", "maxLength": 500 },
+        "showInMembers": { "type": "boolean" },
+        "isVisible": { "type": "boolean" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "attendanceCount": { "type": "number" },
+        "worksCount": { "type": "number" },
+        "lmsPoints": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "role", "fullName", "kelas", "division", "qrCodeToken", "avatarColor", "isVisible", "createdAt", "updatedAt"]
+    },
+    "MemberPrivate": {
+      "title": "MemberPrivate",
+      "description": "Restricted PII and hardware NFC identifier for a member, readable only by the owner or admins.",
+      "type": "object",
+      "properties": {
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "nis": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "nfcUid": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "email": { "type": "string", "maxLength": 160 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["memberId", "nis", "nfcUid", "updatedAt"]
+    },
+    "NewsArticle": {
+      "title": "NewsArticle",
+      "description": "School journalism and MMC activity article displayed on the Home portal.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 6000 },
+        "imageUrl": { "type": "string", "maxLength": 500 },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "publishedAt": { "type": "string", "minLength": 4, "maxLength": 30 },
+        "isFeatured": { "type": "boolean" },
+        "isPublished": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "slug", "category", "summary", "content", "authorName", "publishedAt", "isPublished", "createdByUid", "createdAt"]
+    },
+    "ScheduleEvent": {
+      "title": "ScheduleEvent",
+      "description": "MMC extracurricular activity schedule item.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "division": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "eventDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "startTime": { "type": "string", "minLength": 4, "maxLength": 12 },
+        "endTime": { "type": "string", "minLength": 4, "maxLength": 12 },
+        "location": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 800 },
+        "mentor": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "reminderSent": { "type": "boolean" },
+        "isPublished": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "division", "eventDate", "startTime", "endTime", "location", "mentor", "isPublished", "createdByUid", "createdAt"]
+    },
+    "StudentWork": {
+      "title": "StudentWork",
+      "description": "Student photography, videography, or graphic design showcase work.",
+      "type": "object",
+      "properties": {
+        "authorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorMemberId": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authorUsername": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "authorKelas": { "type": "string", "maxLength": 30 },
+        "authorDivision": { "type": "string", "maxLength": 40 },
+        "authorAvatarColor": { "type": "string", "maxLength": 16 },
+        "authorAvatarUrl": { "type": "string", "maxLength": 500 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "description": { "type": "string", "maxLength": 600 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "mediaType": { "type": "string", "enum": ["image", "video"] },
+        "mediaUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "sharesCount": { "type": "number" },
+        "likesCount": { "type": "number" },
+        "commentsCount": { "type": "number" },
+        "commentsDisabled": { "type": "boolean" },
+        "approvalStatus": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "reviewNote": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorUid", "authorName", "authorUsername", "title", "category", "mediaType", "mediaUrl", "sharesCount", "likesCount", "commentsCount", "commentsDisabled", "approvalStatus", "createdAt", "updatedAt"]
+    },
+    "WorkComment": {
+      "title": "WorkComment",
+      "description": "Comment on an approved student work.",
+      "type": "object",
+      "properties": {
+        "workId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authorUsername": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "authorKelas": { "type": "string", "maxLength": 30 },
+        "authorRole": { "type": "string", "enum": ["admin", "student"] },
+        "content": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "isHidden": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workId", "authorUid", "authorName", "authorUsername", "content", "isHidden", "createdAt"]
+    },
+    "WorkLike": {
+      "title": "WorkLike",
+      "description": "Per-user like marker document on a student work.",
+      "type": "object",
+      "properties": {
+        "workId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workId", "userUid", "createdAt"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily attendance record via NFC/RFID, QR Scan, or Manual Admin.",
+      "type": "object",
+      "properties": {
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "studentUid": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "kelas": { "type": "string", "maxLength": 30 },
+        "division": { "type": "string", "maxLength": 40 },
+        "attendanceDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "checkInTime": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "method": { "type": "string", "enum": ["NFC/RFID", "QR Scan", "Manual Admin"] },
+        "status": { "type": "string", "enum": ["Hadir", "Terlambat", "Izin"] },
+        "sessionTitle": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "recordedBy": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["memberId", "fullName", "username", "attendanceDate", "checkInTime", "method", "status", "sessionTitle", "recordedBy", "recordedByUid", "createdAt"]
+    },
+    "LmsTask": {
+      "title": "LmsTask",
+      "description": "Multi-stage LMS task created by Pembina/Admin with points reward.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "division": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "pointsReward": { "type": "number" },
+        "dueDate": { "type": "string", "maxLength": 30 },
+        "isPublished": { "type": "boolean" },
+        "creatorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "division", "pointsReward", "isPublished", "creatorName", "createdByUid", "createdAt"]
+    },
+    "LmsTaskStage": {
+      "title": "LmsTaskStage",
+      "description": "Sequential learning stage (reading, practice, or upload) belonging to an LmsTask.",
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "stageOrder": { "type": "number" },
+        "stageType": { "type": "string", "enum": ["reading", "practice", "upload"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "content": { "type": "string", "maxLength": 4000 },
+        "attachmentUrl": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["taskId", "stageOrder", "stageType", "title", "createdAt"]
+    },
+    "LmsTaskProgress": {
+      "title": "LmsTaskProgress",
+      "description": "Per-user completion record for a single LMS task stage.",
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "stageId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "memberId": { "type": "string", "maxLength": 128 },
+        "responseText": { "type": "string", "maxLength": 1000 },
+        "completedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["taskId", "stageId", "userUid", "completedAt"]
+    },
+    "LmsTaskSubmission": {
+      "title": "LmsTaskSubmission",
+      "description": "Final uploaded submission and admin review status/points for an LMS task.",
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "memberId": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "kelas": { "type": "string", "maxLength": 30 },
+        "division": { "type": "string", "maxLength": 40 },
+        "fileUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "fileType": { "type": "string", "maxLength": 120 },
+        "submissionNote": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["submitted", "approved", "revision"] },
+        "pointsAwarded": { "type": "number" },
+        "adminFeedback": { "type": "string", "maxLength": 500 },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "reviewedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["taskId", "userUid", "fullName", "username", "fileUrl", "fileName", "status", "pointsAwarded", "submittedAt"]
+    },
+    "BlockedWord": {
+      "title": "BlockedWord",
+      "description": "Moderated negative word blocked from student work comments.",
+      "type": "object",
+      "properties": {
+        "word": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "isActive": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["word", "isActive", "createdByUid", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Real-time notification targeted to a specific user UID or broadcast ('ALL').",
+      "type": "object",
+      "properties": {
+        "targetUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "type": "string", "enum": ["attendance", "schedule", "like", "comment", "share", "moderation", "task"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "linkTarget": { "type": "string", "maxLength": 120 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["targetUid", "type", "title", "message", "isRead", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminMarker" },
+      "description": "Trusted admin role marker documents keyed by Firebase Auth UID."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Authenticated user account metadata and member profile linkage."
+    },
+    "/site_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SiteSettingsPortal" },
+      "description": "Portal branding, hero copy, footer school address, and social links ('portal' doc)."
+    },
+    "/members_public/{memberId}": {
+      "schema": { "$ref": "#/entities/MemberPublic" },
+      "description": "Non-PII member showcase cards visible in the Anggota directory."
+    },
+    "/members_private/{memberId}": {
+      "schema": { "$ref": "#/entities/MemberPrivate" },
+      "description": "PII and NFC card UIDs isolated from public reads."
+    },
+    "/news_articles/{articleId}": {
+      "schema": { "$ref": "#/entities/NewsArticle" },
+      "description": "Published journalism articles and liputan sekolah."
+    },
+    "/schedules/{scheduleId}": {
+      "schema": { "$ref": "#/entities/ScheduleEvent" },
+      "description": "Extracurricular meeting and workshop schedules."
+    },
+    "/works/{workId}": {
+      "schema": { "$ref": "#/entities/StudentWork" },
+      "description": "Student multimedia works with moderation status and counters."
+    },
+    "/works/{workId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/WorkComment" },
+      "description": "Comments nested under a student work."
+    },
+    "/works/{workId}/likes/{likeId}": {
+      "schema": { "$ref": "#/entities/WorkLike" },
+      "description": "Per-user like marker keyed by user UID under a student work."
+    },
+    "/attendance_records/{recordId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Daily NFC/RFID and QR Code attendance records."
+    },
+    "/lms_tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/LmsTask" },
+      "description": "LMS task definitions created by Pembina/Admin."
+    },
+    "/lms_tasks/{taskId}/stages/{stageId}": {
+      "schema": { "$ref": "#/entities/LmsTaskStage" },
+      "description": "Ordered learning stages under an LMS task."
+    },
+    "/lms_task_progress/{progressId}": {
+      "schema": { "$ref": "#/entities/LmsTaskProgress" },
+      "description": "Member completion markers for individual LMS stages."
+    },
+    "/lms_task_submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/LmsTaskSubmission" },
+      "description": "Member task file uploads and Pembina review/points status."
+    },
+    "/blocked_words/{wordId}": {
+      "schema": { "$ref": "#/entities/BlockedWord" },
+      "description": "Comment moderation filter word list."
+    },
+    "/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "User-targeted or broadcast portal notifications."
+    }
+  }
+}

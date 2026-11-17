@@ -6,7 +6,18 @@ import crypto from 'node:crypto';
 import multer from 'multer';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
-import { db, initDatabase, hashPassword, verifyPassword, UPLOADS_DIR } from './server/db.ts';
+import {
+  checkpointDatabase,
+  closeDatabaseSafely,
+  createVerifiedBackup,
+  db,
+  getDatabaseHealth,
+  hashPassword,
+  initDatabase,
+  pruneExpiredSessions,
+  UPLOADS_DIR,
+  verifyPassword,
+} from './server/db.ts';
 
 initDatabase();
 
@@ -512,33 +523,44 @@ app.patch('/api/profile', requireAuth, (req: AuthedRequest, res) => {
   const { bio, division, newPassword } = req.body as { bio?: string; division?: string; newPassword?: string };
   const userId = req.user!.id;
 
-  if (bio !== undefined) {
-    db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio.trim().slice(0, 300), userId);
-  }
-  if (division !== undefined && ['Fotografi', 'Videografi', 'Jurnalistik', 'Desain Grafis', 'Penyiaran'].includes(division)) {
-    db.prepare('UPDATE users SET division = ? WHERE id = ?').run(division, userId);
-  }
-  if (newPassword && newPassword.trim().length >= 6) {
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword.trim()), userId);
-  }
+  db.transaction(() => {
+    if (bio !== undefined) {
+      db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio.trim().slice(0, 300), userId);
+    }
+    if (division !== undefined && ['Fotografi', 'Videografi', 'Jurnalistik', 'Desain Grafis', 'Penyiaran'].includes(division)) {
+      db.prepare('UPDATE users SET division = ? WHERE id = ?').run(division, userId);
+    }
+    if (newPassword && newPassword.trim().length >= 6) {
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword.trim()), userId);
+    }
+  })();
+
+  checkpointDatabase('PASSIVE');
 
   const updated = db.prepare(`
     SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, created_at
     FROM users WHERE id = ?
-  `).get(userId);
-  res.json({ user: updated });
+  `).get(userId) as AuthUser;
+  res.json({ user: { ...updated, lms_points: getUserTotalLmsPoints(userId) } });
 });
 
 // Upload own profile photo (member or admin)
 app.post('/api/profile/avatar', requireAuth, upload.single('avatar'), (req: AuthedRequest, res) => {
   const file = req.file;
   if (!file || !file.mimetype.startsWith('image/')) {
+    if (file) {
+      fs.unlink(file.path, () => {});
+    }
     res.status(400).json({ error: 'File foto profil wajib berupa gambar (JPG, PNG, atau WebP).' });
     return;
   }
 
   const userId = req.user!.id;
   const existing = db.prepare('SELECT avatar_url FROM users WHERE id = ?').get(userId) as { avatar_url?: string } | undefined;
+  const avatarUrl = `/uploads/${file.filename}`;
+  db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(avatarUrl, userId);
+  checkpointDatabase('PASSIVE');
+
   if (existing?.avatar_url && existing.avatar_url.startsWith('/uploads/')) {
     const oldPath = path.join(UPLOADS_DIR, path.basename(existing.avatar_url));
     if (fs.existsSync(oldPath)) {
@@ -546,16 +568,13 @@ app.post('/api/profile/avatar', requireAuth, upload.single('avatar'), (req: Auth
     }
   }
 
-  const avatarUrl = `/uploads/${file.filename}`;
-  db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(avatarUrl, userId);
-
   const updated = db.prepare(`
     SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, created_at
     FROM users WHERE id = ?
-  `).get(userId);
+  `).get(userId) as AuthUser;
 
   broadcastEvent({ type: 'member:updated', payload: { id: userId, avatar_url: avatarUrl } });
-  res.json({ user: updated });
+  res.json({ user: { ...updated, lms_points: getUserTotalLmsPoints(userId) } });
 });
 
 // ==================== ADMIN STUDENT MANAGEMENT (20 REGISTERED SEATS) ====================
@@ -618,6 +637,7 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
       SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, created_at
       FROM users WHERE id = ?
     `).get(info.lastInsertRowid);
+    checkpointDatabase('PASSIVE');
     res.status(201).json({ student: created });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal membuat akun siswa.' });
@@ -657,8 +677,9 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
   }
 
   try {
+    let cleanUsername: string | null = null;
     if (username !== undefined && username.trim()) {
-      const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+      cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
       if (!cleanUsername) {
         res.status(400).json({ error: 'Format username tidak valid.' });
         return;
@@ -668,56 +689,68 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
         res.status(409).json({ error: 'Username sudah digunakan oleh siswa lain.' });
         return;
       }
-      db.prepare('UPDATE users SET username = ? WHERE id = ?').run(cleanUsername, id);
     }
 
+    let cleanNfc: string | null = null;
     if (nfc_uid !== undefined && nfc_uid.trim()) {
-      const cleanNfc = nfc_uid.trim().toUpperCase();
+      cleanNfc = nfc_uid.trim().toUpperCase();
       const dupNfc = db.prepare('SELECT id FROM users WHERE UPPER(nfc_uid) = UPPER(?) AND id != ?').get(cleanNfc, id);
       if (dupNfc) {
         res.status(409).json({ error: 'UID Kartu NFC/RFID sudah terdaftar pada siswa lain.' });
         return;
       }
-      db.prepare('UPDATE users SET nfc_uid = ? WHERE id = ?').run(cleanNfc, id);
     }
 
+    let cleanQr: string | null = null;
     if (qr_code_token !== undefined && qr_code_token.trim()) {
-      const cleanQr = qr_code_token.trim().toUpperCase();
+      cleanQr = qr_code_token.trim().toUpperCase();
       const dupQr = db.prepare('SELECT id FROM users WHERE UPPER(qr_code_token) = UPPER(?) AND id != ?').get(cleanQr, id);
       if (dupQr) {
         res.status(409).json({ error: 'Token QR Code sudah digunakan oleh siswa lain.' });
         return;
       }
-      db.prepare('UPDATE users SET qr_code_token = ? WHERE id = ?').run(cleanQr, id);
     }
 
-    if (full_name !== undefined && full_name.trim()) {
-      db.prepare('UPDATE users SET full_name = ? WHERE id = ?').run(full_name.trim(), id);
-    }
-    if (nis !== undefined && nis.trim()) {
-      db.prepare('UPDATE users SET nis = ? WHERE id = ?').run(nis.trim(), id);
-    }
-    if (kelas !== undefined && kelas.trim()) {
-      db.prepare('UPDATE users SET kelas = ? WHERE id = ?').run(kelas.trim(), id);
-    }
-    if (division !== undefined && division.trim()) {
-      db.prepare('UPDATE users SET division = ? WHERE id = ?').run(division.trim(), id);
-    }
-    if (bio !== undefined) {
-      db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio.trim().slice(0, 400), id);
-    }
-    if (avatar_color !== undefined && /^#[0-9A-Fa-f]{6}$/.test(avatar_color.trim())) {
-      db.prepare('UPDATE users SET avatar_color = ? WHERE id = ?').run(avatar_color.trim(), id);
-    }
-    if (password && password.trim().length >= 4) {
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password.trim()), id);
-    }
+    db.transaction(() => {
+      if (cleanUsername !== null) {
+        db.prepare('UPDATE users SET username = ? WHERE id = ?').run(cleanUsername, id);
+      }
+      if (cleanNfc !== null) {
+        db.prepare('UPDATE users SET nfc_uid = ? WHERE id = ?').run(cleanNfc, id);
+      }
+      if (cleanQr !== null) {
+        db.prepare('UPDATE users SET qr_code_token = ? WHERE id = ?').run(cleanQr, id);
+      }
+      if (full_name !== undefined && full_name.trim()) {
+        db.prepare('UPDATE users SET full_name = ? WHERE id = ?').run(full_name.trim(), id);
+      }
+      if (nis !== undefined && nis.trim()) {
+        db.prepare('UPDATE users SET nis = ? WHERE id = ?').run(nis.trim(), id);
+      }
+      if (kelas !== undefined && kelas.trim()) {
+        db.prepare('UPDATE users SET kelas = ? WHERE id = ?').run(kelas.trim(), id);
+      }
+      if (division !== undefined && division.trim()) {
+        db.prepare('UPDATE users SET division = ? WHERE id = ?').run(division.trim(), id);
+      }
+      if (bio !== undefined) {
+        db.prepare('UPDATE users SET bio = ? WHERE id = ?').run(bio.trim().slice(0, 400), id);
+      }
+      if (avatar_color !== undefined && /^#[0-9A-Fa-f]{6}$/.test(avatar_color.trim())) {
+        db.prepare('UPDATE users SET avatar_color = ? WHERE id = ?').run(avatar_color.trim(), id);
+      }
+      if (password && password.trim().length >= 4) {
+        db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password.trim()), id);
+      }
+    })();
+
+    checkpointDatabase('PASSIVE');
 
     const updated = db.prepare(`
       SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, created_at
       FROM users WHERE id = ?
-    `).get(id);
-    res.json({ student: updated });
+    `).get(id) as AuthUser;
+    res.json({ student: { ...updated, lms_points: getUserTotalLmsPoints(id) } });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal memperbarui data profil siswa.' });
   }
@@ -730,6 +763,7 @@ app.delete('/api/admin/students/:id', requireAdmin, (req, res) => {
     res.status(404).json({ error: 'Akun siswa tidak ditemukan.' });
     return;
   }
+  checkpointDatabase('PASSIVE');
   res.json({ ok: true });
 });
 
@@ -829,6 +863,8 @@ app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
     message: `${student.full_name} tercatat ${resolvedStatus} pada ${attendanceDate} pukul ${checkInTime} ${clientNow.tzLabel} (${resolvedSession}).`,
     linkTarget: `profil/${student.username}`,
   });
+
+  checkpointDatabase('PASSIVE');
 
   res.json({
     alreadyRecorded: Boolean(existingToday),
@@ -1356,34 +1392,41 @@ app.post('/api/admin/site-logo', requireAdmin, upload.single('logo'), (req, res)
 
   if (reset === 'true') {
     deleteOldUploadedLogo(current.logoUrl);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', '', ?)`).run(now);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_name', 'Multimedia', ?)`).run(now);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('footer_address', 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215', ?)`).run(now);
+    db.transaction(() => {
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', '', ?)`).run(now);
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_name', 'Multimedia', ?)`).run(now);
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('footer_address', 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215', ?)`).run(now);
+    })();
   } else {
-    if (req.file) {
-      if (!req.file.mimetype.startsWith('image/')) {
-        res.status(400).json({ error: 'File logo harus berupa gambar (PNG, JPG, WebP, atau SVG).' });
-        return;
-      }
-      deleteOldUploadedLogo(current.logoUrl);
-      const nextUrl = `/uploads/${req.file.filename}`;
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', ?, ?)`).run(nextUrl, now);
-    } else if (logoUrl !== undefined) {
-      const trimmedUrl = logoUrl.trim();
-      if (trimmedUrl === '' && current.logoUrl) {
-        deleteOldUploadedLogo(current.logoUrl);
-      }
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', ?, ?)`).run(trimmedUrl, now);
+    if (req.file && !req.file.mimetype.startsWith('image/')) {
+      fs.unlink(req.file.path, () => {});
+      res.status(400).json({ error: 'File logo harus berupa gambar (PNG, JPG, WebP, atau SVG).' });
+      return;
     }
 
-    if (brandName !== undefined) {
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_name', ?, ?)`).run(brandName.trim().slice(0, 60), now);
-    }
-    if (footerAddress !== undefined) {
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('footer_address', ?, ?)`).run(footerAddress.trim().slice(0, 200), now);
-    }
+    db.transaction(() => {
+      if (req.file) {
+        deleteOldUploadedLogo(current.logoUrl);
+        const nextUrl = `/uploads/${req.file.filename}`;
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', ?, ?)`).run(nextUrl, now);
+      } else if (logoUrl !== undefined) {
+        const trimmedUrl = logoUrl.trim();
+        if (trimmedUrl === '' && current.logoUrl) {
+          deleteOldUploadedLogo(current.logoUrl);
+        }
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_logo_url', ?, ?)`).run(trimmedUrl, now);
+      }
+
+      if (brandName !== undefined) {
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('brand_name', ?, ?)`).run(brandName.trim().slice(0, 60), now);
+      }
+      if (footerAddress !== undefined) {
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('footer_address', ?, ?)`).run(footerAddress.trim().slice(0, 200), now);
+      }
+    })();
   }
 
+  checkpointDatabase('PASSIVE');
   const updated = getSiteSettings();
   broadcastEvent({ type: 'settings:updated', payload: updated });
   res.json({ siteSettings: updated });
@@ -1411,50 +1454,58 @@ app.post('/api/admin/hero-settings', requireAdmin, upload.single('heroImage'), (
 
   if (reset === 'true') {
     deleteOldUploadedHero(current.heroImageUrl);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_eyebrow', 'SMP Negeri 2 Ciamis · Ekstrakurikuler Resmi', ?)`).run(now);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_title', 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis', ?)`).run(now);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_description', 'Wadah resmi siswa SMPN 2 Ciamis dalam bidang fotografi, videografi, penyiaran, desain grafis, dan jurnalistik sekolah—dilengkapi arsip karya digital serta sistem absensi kartu pelajar NFC/RFID dan QR Code secara real-time.', ?)`).run(now);
-    db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', '', ?)`).run(now);
+    db.transaction(() => {
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_eyebrow', 'SMP Negeri 2 Ciamis · Ekstrakurikuler Resmi', ?)`).run(now);
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_title', 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis', ?)`).run(now);
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_description', 'Wadah resmi siswa SMPN 2 Ciamis dalam bidang fotografi, videografi, penyiaran, desain grafis, dan jurnalistik sekolah—dilengkapi arsip karya digital serta sistem absensi kartu pelajar NFC/RFID dan QR Code secara real-time.', ?)`).run(now);
+      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', '', ?)`).run(now);
+    })();
   } else {
-    if (heroEyebrow !== undefined) {
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_eyebrow', ?, ?)`).run(
-        heroEyebrow.trim().slice(0, 120),
-        now
-      );
+    if (heroTitle !== undefined && !heroTitle.trim()) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      res.status(400).json({ error: 'Judul utama hero tidak boleh kosong.' });
+      return;
     }
-    if (heroTitle !== undefined) {
-      if (!heroTitle.trim()) {
-        res.status(400).json({ error: 'Judul utama hero tidak boleh kosong.' });
-        return;
+    if (req.file && !req.file.mimetype.startsWith('image/')) {
+      fs.unlink(req.file.path, () => {});
+      res.status(400).json({ error: 'Foto hero harus berupa gambar (PNG, JPG, WebP, atau SVG).' });
+      return;
+    }
+
+    db.transaction(() => {
+      if (heroEyebrow !== undefined) {
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_eyebrow', ?, ?)`).run(
+          heroEyebrow.trim().slice(0, 120),
+          now
+        );
       }
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_title', ?, ?)`).run(
-        heroTitle.trim().slice(0, 160),
-        now
-      );
-    }
-    if (heroDescription !== undefined) {
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_description', ?, ?)`).run(
-        heroDescription.trim().slice(0, 600),
-        now
-      );
-    }
-    if (req.file) {
-      if (!req.file.mimetype.startsWith('image/')) {
-        res.status(400).json({ error: 'Foto hero harus berupa gambar (PNG, JPG, WebP, atau SVG).' });
-        return;
+      if (heroTitle !== undefined) {
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_title', ?, ?)`).run(
+          heroTitle.trim().slice(0, 160),
+          now
+        );
       }
-      deleteOldUploadedHero(current.heroImageUrl);
-      const nextUrl = `/uploads/${req.file.filename}`;
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', ?, ?)`).run(nextUrl, now);
-    } else if (heroImageUrl !== undefined) {
-      const trimmedUrl = heroImageUrl.trim();
-      if (trimmedUrl === '' && current.heroImageUrl) {
+      if (heroDescription !== undefined) {
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_description', ?, ?)`).run(
+          heroDescription.trim().slice(0, 600),
+          now
+        );
+      }
+      if (req.file) {
         deleteOldUploadedHero(current.heroImageUrl);
+        const nextUrl = `/uploads/${req.file.filename}`;
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', ?, ?)`).run(nextUrl, now);
+      } else if (heroImageUrl !== undefined) {
+        const trimmedUrl = heroImageUrl.trim();
+        if (trimmedUrl === '' && current.heroImageUrl) {
+          deleteOldUploadedHero(current.heroImageUrl);
+        }
+        db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', ?, ?)`).run(trimmedUrl, now);
       }
-      db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('hero_image_url', ?, ?)`).run(trimmedUrl, now);
-    }
+    })();
   }
 
+  checkpointDatabase('PASSIVE');
   const updated = getSiteSettings();
   broadcastEvent({ type: 'settings:updated', payload: updated });
   res.json({ siteSettings: updated });
@@ -1462,6 +1513,7 @@ app.post('/api/admin/hero-settings', requireAdmin, upload.single('heroImage'), (
 
 app.post('/api/admin/social-icon', requireAdmin, upload.single('icon'), (req, res) => {
   if (!req.file || !req.file.mimetype.startsWith('image/')) {
+    if (req.file) fs.unlink(req.file.path, () => {});
     res.status(400).json({ error: 'File ikon sosial media harus berupa gambar (PNG/SVG/WebP).' });
     return;
   }
@@ -1513,6 +1565,7 @@ app.post('/api/admin/social-links', requireAdmin, (req, res) => {
     );
   }
 
+  checkpointDatabase('PASSIVE');
   const updated = getSiteSettings();
   broadcastEvent({ type: 'settings:updated', payload: updated });
   res.json({ siteSettings: updated });
@@ -1959,7 +2012,87 @@ app.post('/api/admin/task-submissions/:id/review', requireAdmin, (req, res) => {
     linkTarget: 'tugas',
   });
 
+  checkpointDatabase('PASSIVE');
   res.json({ ok: true, points_awarded: resolvedPoints, totalPoints });
+});
+
+// ==================== ADMIN DATABASE HEALTH, CHECKPOINT & BACKUP ====================
+
+app.get('/api/admin/database/status', requireAdmin, (_req, res) => {
+  res.json({ health: getDatabaseHealth() });
+});
+
+app.post('/api/admin/database/checkpoint', requireAdmin, async (_req, res) => {
+  pruneExpiredSessions();
+  checkpointDatabase('TRUNCATE');
+  const backupPath = await createVerifiedBackup();
+  res.json({
+    ok: true,
+    backupCreated: Boolean(backupPath),
+    health: getDatabaseHealth(),
+  });
+});
+
+app.get('/api/admin/database/export', requireAdmin, async (_req, res) => {
+  checkpointDatabase('TRUNCATE');
+  const backupPath = await createVerifiedBackup();
+  if (!backupPath || !fs.existsSync(backupPath)) {
+    res.status(500).json({ error: 'Gagal membuat file backup database.' });
+    return;
+  }
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.download(backupPath, `mmc_smpn2_ciamis_backup_${stamp}.db`);
+});
+
+app.get('/api/admin/database/export-json', requireAdmin, (_req, res) => {
+  checkpointDatabase('PASSIVE');
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    app: 'MMC SMPN 2 Ciamis',
+    users: db
+      .prepare(
+        `SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, show_in_members, created_at FROM users ORDER BY id ASC`
+      )
+      .all(),
+    site_settings: db.prepare('SELECT * FROM site_settings ORDER BY key ASC').all(),
+    news_articles: db.prepare('SELECT * FROM news_articles ORDER BY id ASC').all(),
+    schedules: db.prepare('SELECT * FROM schedules ORDER BY id ASC').all(),
+    works: db.prepare('SELECT * FROM works ORDER BY id ASC').all(),
+    work_likes: db.prepare('SELECT * FROM work_likes ORDER BY work_id ASC').all(),
+    work_comments: db.prepare('SELECT * FROM work_comments ORDER BY id ASC').all(),
+    blocked_words: db.prepare('SELECT * FROM blocked_words ORDER BY id ASC').all(),
+    attendance_records: db.prepare('SELECT * FROM attendance_records ORDER BY id ASC').all(),
+    lms_tasks: db.prepare('SELECT * FROM lms_tasks ORDER BY id ASC').all(),
+    lms_task_stages: db.prepare('SELECT * FROM lms_task_stages ORDER BY id ASC').all(),
+    lms_task_progress: db.prepare('SELECT * FROM lms_task_progress ORDER BY id ASC').all(),
+    lms_task_submissions: db.prepare('SELECT * FROM lms_task_submissions ORDER BY id ASC').all(),
+  };
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="mmc_smpn2_ciamis_backup_${stamp}.json"`
+  );
+  res.send(JSON.stringify(payload, null, 2));
+});
+
+// ==================== GLOBAL ERROR HANDLER ====================
+
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof multer.MulterError) {
+    const msg =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'Ukuran file melebihi batas maksimal 50 MB.'
+        : `Gagal mengunggah file: ${err.message}`;
+    res.status(400).json({ error: msg });
+    return;
+  }
+  if (err instanceof Error) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: 'Terjadi kesalahan internal pada server.' });
 });
 
 // ==================== VITE / STATIC SERVING ====================
@@ -1984,7 +2117,44 @@ async function startServer() {
   const PORT = 3000;
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`MMC SMPN 2 Ciamis server running on http://0.0.0.0:${PORT}`);
+    // Create an initial verified online backup cleanly on boot
+    void createVerifiedBackup();
   });
+
+  // Periodic maintenance: prune expired sessions, checkpoint WAL, refresh verified backup
+  const maintenanceTimer = setInterval(() => {
+    pruneExpiredSessions();
+    checkpointDatabase('PASSIVE');
+    void createVerifiedBackup();
+  }, 5 * 60 * 1000);
+  maintenanceTimer.unref();
+
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(maintenanceTimer);
+    console.log(`Received ${signal}, flushing SQLite WAL & shutting down cleanly...`);
+    wss.clients.forEach((client) => {
+      try {
+        client.close();
+      } catch {
+        // ignore
+      }
+    });
+    server.close(() => {
+      closeDatabaseSafely();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      closeDatabaseSafely();
+      process.exit(0);
+    }, 2500).unref();
+  };
+
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGHUP', () => shutdown('SIGHUP'));
 }
 
 startServer();

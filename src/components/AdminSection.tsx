@@ -5,7 +5,10 @@ import {
   BookOpen,
   CheckCircle2,
   ClipboardCheck,
+  Cloud,
   CreditCard,
+  Database,
+  Download,
   FileText,
   Image as ImageIcon,
   LayoutTemplate,
@@ -33,18 +36,39 @@ import type {
   StudentProfile,
   StudentWork,
 } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getStoredToken } from '../lib/api';
+import { auth } from '../lib/firebase';
+import {
+  addBlockedWordInFirestore,
+  createLmsTaskInFirestore,
+  createNewsInFirestore,
+  deleteBlockedWordInFirestore,
+  deleteLmsTaskInFirestore,
+  deleteStudentFromFirestore,
+  reviewLmsSubmissionInFirestore,
+  reviewWorkInFirestore,
+  sanitizeDocId,
+  saveSiteSettingsToFirestore,
+  saveStudentToFirestore,
+} from '../lib/firestoreSync';
 import { HERO_IMAGE, formatDateID, formatTimeAgo, resolveMediaUrl } from '../lib/mediaAssets';
 import { NmcLogo } from './NmcLogo';
 import { SocialSilhouetteIcon } from './SocialSilhouetteIcon';
 
-export type AdminSubTab = 'students' | 'tasks' | 'review' | 'moderation' | 'news' | 'hero' | 'branding';
+export type AdminSubTab = 'students' | 'tasks' | 'review' | 'moderation' | 'news' | 'hero' | 'branding' | 'database';
 
 interface AdminSectionProps {
   mode: 'admin' | 'approval';
   members: StudentProfile[];
   siteBranding: SiteBranding;
   pendingRefreshKey?: number;
+  cloudAdminTasks?: AdminLmsTask[];
+  cloudPendingWorks?: StudentWork[];
+  cloudBlockedWords?: Array<{ id: number; firestoreId?: string; word: string }>;
+  isFirebaseAdmin?: boolean;
+  firebaseEmail?: string | null;
+  cloudSeeded?: boolean;
+  onSyncCloudNow?: () => Promise<void>;
   onPendingCountChange?: (count: number) => void;
   onBrandingUpdated: (branding: SiteBranding) => void;
   onMembersChanged: () => void;
@@ -60,6 +84,13 @@ export function AdminSection({
   members,
   siteBranding,
   pendingRefreshKey = 0,
+  cloudAdminTasks,
+  cloudPendingWorks,
+  cloudBlockedWords,
+  isFirebaseAdmin = false,
+  firebaseEmail = null,
+  cloudSeeded = false,
+  onSyncCloudNow,
   onPendingCountChange,
   onBrandingUpdated,
   onMembersChanged,
@@ -70,6 +101,7 @@ export function AdminSection({
   onToast,
 }: AdminSectionProps) {
   const [tab, setTab] = useState<AdminSubTab>(mode === 'approval' ? 'review' : 'students');
+  const [syncingCloud, setSyncingCloud] = useState(false);
 
   // Create student state
   const [username, setUsername] = useState('');
@@ -104,7 +136,7 @@ export function AdminSection({
   editingIdRef.current = editingId;
 
   // Blocked words moderation
-  const [blockedWords, setBlockedWords] = useState<Array<{ id: number; word: string }>>([]);
+  const [blockedWords, setBlockedWords] = useState<Array<{ id: number; firestoreId?: string; word: string }>>([]);
   const [newWord, setNewWord] = useState('');
 
   // News creation
@@ -227,6 +259,12 @@ export function AdminSection({
   ]);
 
   const loadPendingWorks = useCallback(async () => {
+    if (isFirebaseAdmin && cloudPendingWorks) {
+      hasLoadedPendingRef.current = true;
+      setPendingWorks(cloudPendingWorks);
+      return;
+    }
+    if (!getStoredToken()) return;
     setLoadingPending(true);
     try {
       const res = await apiFetch<{ works: StudentWork[] }>('/api/admin/works/pending');
@@ -237,9 +275,14 @@ export function AdminSection({
     } finally {
       setLoadingPending(false);
     }
-  }, []);
+  }, [isFirebaseAdmin, cloudPendingWorks]);
 
   const loadAdminTasks = useCallback(async () => {
+    if (isFirebaseAdmin && cloudAdminTasks) {
+      setAdminTasks(cloudAdminTasks);
+      return;
+    }
+    if (!getStoredToken()) return;
     setLoadingTasks(true);
     try {
       const res = await apiFetch<{ tasks: AdminLmsTask[] }>('/api/admin/tasks');
@@ -249,13 +292,54 @@ export function AdminSection({
     } finally {
       setLoadingTasks(false);
     }
-  }, []);
+  }, [isFirebaseAdmin, cloudAdminTasks]);
+
+  useEffect(() => {
+    if (isFirebaseAdmin && cloudPendingWorks) {
+      hasLoadedPendingRef.current = true;
+      setPendingWorks(cloudPendingWorks);
+    }
+  }, [isFirebaseAdmin, cloudPendingWorks]);
+
+  useEffect(() => {
+    if (isFirebaseAdmin && cloudAdminTasks) {
+      setAdminTasks(cloudAdminTasks);
+    }
+  }, [isFirebaseAdmin, cloudAdminTasks]);
 
   useEffect(() => {
     if (hasLoadedPendingRef.current) {
       onPendingCountChange?.(pendingWorks.length);
     }
   }, [pendingWorks, onPendingCountChange]);
+
+  // Database Health & Backup state
+  interface DbHealthState {
+    integrity: string;
+    journalMode: string;
+    synchronous: string;
+    dbBytes: number;
+    walBytes: number;
+    shmBytes: number;
+    lastBackupAt: string | null;
+    lastBackupBytes: number;
+    counts: Record<string, number>;
+  }
+  const [dbHealth, setDbHealth] = useState<DbHealthState | null>(null);
+  const [loadingDbHealth, setLoadingDbHealth] = useState(false);
+  const [runningCheckpoint, setRunningCheckpoint] = useState(false);
+
+  const loadDbHealth = useCallback(async () => {
+    setLoadingDbHealth(true);
+    try {
+      const res = await apiFetch<{ health: DbHealthState }>('/api/admin/database/status');
+      setDbHealth(res.health);
+    } catch {
+      // ignore
+    } finally {
+      setLoadingDbHealth(false);
+    }
+  }, []);
 
   useEffect(() => {
     loadPendingWorks();
@@ -264,15 +348,22 @@ export function AdminSection({
   useEffect(() => {
     if (activeSubTab === 'tasks') {
       loadAdminTasks();
+    } else if (activeSubTab === 'database') {
+      loadDbHealth();
     }
-  }, [activeSubTab, loadAdminTasks]);
+  }, [activeSubTab, loadAdminTasks, loadDbHealth]);
 
   useEffect(() => {
     if (activeSubTab !== 'moderation') return;
+    if (isFirebaseAdmin && cloudBlockedWords) {
+      setBlockedWords(cloudBlockedWords);
+      return;
+    }
+    if (!getStoredToken()) return;
     apiFetch<{ words: Array<{ id: number; word: string }> }>('/api/admin/blocked-words')
       .then((res) => setBlockedWords(res.words))
       .catch(() => {});
-  }, [activeSubTab]);
+  }, [activeSubTab, isFirebaseAdmin, cloudBlockedWords]);
 
   // Global USB HID Keyboard Wedge listener while Admin is editing or listening for a card tap
   useEffect(() => {
@@ -385,24 +476,44 @@ export function AdminSection({
     e.preventDefault();
     setCreatingStudent(true);
     try {
-      await apiFetch('/api/admin/students', {
-        method: 'POST',
-        body: JSON.stringify({
-          username,
-          password,
-          full_name: fullName,
-          nis,
+      if (auth.currentUser && isFirebaseAdmin) {
+        const cleanUser = username.trim().toLowerCase();
+        await saveStudentToFirestore({
+          username: cleanUser,
+          role: 'student',
+          full_name: fullName.trim(),
+          nis: nis.trim(),
           kelas,
           division,
-          nfc_uid: nfcUid || undefined,
-        }),
-      });
+          bio: `Peserta aktif divisi ${division} Multimedia Media Center SMPN 2 Ciamis.`,
+          nfc_uid: (nfcUid || `04${Date.now().toString(16).slice(-8)}`).toUpperCase(),
+          qr_code_token: `MMC-${cleanUser.toUpperCase().slice(0, 8)}`,
+          avatar_color: '#1D4ED8',
+          show_in_members: true,
+        });
+      }
+      if (getStoredToken()) {
+        await apiFetch('/api/admin/students', {
+          method: 'POST',
+          body: JSON.stringify({
+            username,
+            password,
+            full_name: fullName,
+            nis,
+            kelas,
+            division,
+            nfc_uid: nfcUid || undefined,
+          }),
+        }).catch((err) => {
+          if (!auth.currentUser || !isFirebaseAdmin) throw err;
+        });
+      }
       setUsername('');
       setFullName('');
       setNis('');
       setNfcUid('');
       onMembersChanged();
-      onToast('Akun siswa baru berhasil dibuat.', 'success');
+      onToast('Akun siswa baru berhasil dibuat dan tersimpan di Cloud.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal membuat akun siswa.', 'error');
     } finally {
@@ -433,26 +544,49 @@ export function AdminSection({
     if (editingId === null) return;
     setSavingEdit(true);
     try {
-      await apiFetch(`/api/admin/students/${editingId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          full_name: editFullName,
-          username: editUsername,
-          nis: editNis,
-          kelas: editKelas,
+      const targetMember = members.find((m) => m.id === editingId);
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveStudentToFirestore({
+          memberId: targetMember?.firestoreId,
+          legacyId: editingId,
+          username: editUsername.trim().toLowerCase(),
+          role: targetMember?.role || 'student',
+          full_name: editFullName.trim(),
+          nis: editNis.trim(),
+          kelas: editKelas.trim(),
           division: editDivision,
-          bio: editBio,
-          nfc_uid: editNfc,
-          qr_code_token: editQrToken,
+          bio: editBio.trim(),
+          nfc_uid: editNfc.trim(),
+          qr_code_token: editQrToken.trim(),
           avatar_color: editAvatarColor,
-          password: editPass || undefined,
-        }),
-      });
+          avatar_url: targetMember?.avatar_url,
+          show_in_members: true,
+        });
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/admin/students/${editingId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            full_name: editFullName,
+            username: editUsername,
+            nis: editNis,
+            kelas: editKelas,
+            division: editDivision,
+            bio: editBio,
+            nfc_uid: editNfc,
+            qr_code_token: editQrToken,
+            avatar_color: editAvatarColor,
+            password: editPass || undefined,
+          }),
+        }).catch((err) => {
+          if (!auth.currentUser || !isFirebaseAdmin) throw err;
+        });
+      }
       setEditingId(null);
       setUsbListeningMode('idle');
       setEditPass('');
       onMembersChanged();
-      onToast('Seluruh profil siswa berhasil diperbarui.', 'success');
+      onToast('Seluruh profil siswa berhasil diperbarui dan disinkronkan.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memperbarui profil siswa.', 'error');
     } finally {
@@ -462,7 +596,13 @@ export function AdminSection({
 
   const handleDeleteStudent = async (student: StudentProfile) => {
     try {
-      await apiFetch(`/api/admin/students/${student.id}`, { method: 'DELETE' });
+      if (auth.currentUser && isFirebaseAdmin) {
+        const fId = student.firestoreId || sanitizeDocId(`member_${student.username}`);
+        await deleteStudentFromFirestore(fId);
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/admin/students/${student.id}`, { method: 'DELETE' }).catch(() => {});
+      }
       onMembersChanged();
       onToast(`Akun ${student.full_name} dihapus dari daftar peserta.`, 'info');
     } catch (err) {
@@ -474,11 +614,16 @@ export function AdminSection({
     e.preventDefault();
     if (!newWord.trim()) return;
     try {
-      const res = await apiFetch<{ words: Array<{ id: number; word: string }> }>('/api/admin/blocked-words', {
-        method: 'POST',
-        body: JSON.stringify({ word: newWord.trim() }),
-      });
-      setBlockedWords(res.words);
+      if (auth.currentUser && isFirebaseAdmin) {
+        await addBlockedWordInFirestore(newWord.trim());
+      }
+      if (getStoredToken()) {
+        const res = await apiFetch<{ words: Array<{ id: number; word: string }> }>('/api/admin/blocked-words', {
+          method: 'POST',
+          body: JSON.stringify({ word: newWord.trim() }),
+        }).catch(() => null);
+        if (res && !isFirebaseAdmin) setBlockedWords(res.words);
+      }
       setNewWord('');
       onToast('Kata negatif ditambahkan ke filter diskusi.', 'success');
     } catch (err) {
@@ -486,10 +631,15 @@ export function AdminSection({
     }
   };
 
-  const handleRemoveBlockedWord = async (id: number) => {
+  const handleRemoveBlockedWord = async (bw: { id: number; firestoreId?: string; word: string }) => {
     try {
-      await apiFetch(`/api/admin/blocked-words/${id}`, { method: 'DELETE' });
-      setBlockedWords((prev) => prev.filter((w) => w.id !== id));
+      if (auth.currentUser && isFirebaseAdmin && bw.firestoreId) {
+        await deleteBlockedWordInFirestore(bw.firestoreId);
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/admin/blocked-words/${bw.id}`, { method: 'DELETE' }).catch(() => {});
+      }
+      setBlockedWords((prev) => prev.filter((w) => w.id !== bw.id));
     } catch {
       // ignore
     }
@@ -499,20 +649,52 @@ export function AdminSection({
     e.preventDefault();
     setSavingNews(true);
     try {
-      const res = await apiFetch<{ article: NewsArticle }>('/api/news', {
-        method: 'POST',
-        body: JSON.stringify({
+      let createdArticle: NewsArticle | null = null;
+      const publishedAt = new Date().toISOString().slice(0, 10);
+
+      if (auth.currentUser && isFirebaseAdmin) {
+        const fId = await createNewsInFirestore({
           title: newsTitle,
           category: newsCategory,
           summary: newsSummary,
           content: newsContent,
-        }),
-      });
-      onNewsCreated(res.article);
+          authorName: 'Pembina MMC SMPN 2 Ciamis',
+          publishedAt,
+        });
+        createdArticle = {
+          id: Date.now(),
+          firestoreId: fId,
+          title: newsTitle,
+          slug: fId,
+          category: newsCategory,
+          summary: newsSummary,
+          content: newsContent,
+          image_url: 'asset:news_liputan',
+          author_name: 'Pembina MMC SMPN 2 Ciamis',
+          published_at: publishedAt,
+          is_featured: 0,
+        };
+      }
+      if (getStoredToken()) {
+        const res = await apiFetch<{ article: NewsArticle }>('/api/news', {
+          method: 'POST',
+          body: JSON.stringify({
+            title: newsTitle,
+            category: newsCategory,
+            summary: newsSummary,
+            content: newsContent,
+          }),
+        }).catch((err) => {
+          if (!createdArticle) throw err;
+          return null;
+        });
+        if (res && !createdArticle) createdArticle = res.article;
+      }
+      if (createdArticle) onNewsCreated(createdArticle);
       setNewsTitle('');
       setNewsSummary('');
       setNewsContent('');
-      onToast('Artikel berita liputan berhasil diterbitkan di Beranda.', 'success');
+      onToast('Artikel berita liputan berhasil diterbitkan di Beranda & Cloud.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menerbitkan artikel.', 'error');
     } finally {
@@ -524,23 +706,39 @@ export function AdminSection({
     e.preventDefault();
     setSavingBranding(true);
     try {
-      const formData = new FormData();
-      formData.append('brandName', brandNameInput);
-      formData.append('footerAddress', footerAddressInput);
-      if (logoFile) {
-        formData.append('logo', logoFile);
+      let nextBranding: SiteBranding = {
+        ...siteBranding,
+        brandName: brandNameInput,
+        footerAddress: footerAddressInput,
+      };
+      if (getStoredToken()) {
+        const formData = new FormData();
+        formData.append('brandName', brandNameInput);
+        formData.append('footerAddress', footerAddressInput);
+        if (logoFile) {
+          formData.append('logo', logoFile);
+        }
+        const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/site-logo', {
+          method: 'POST',
+          body: formData,
+        }).catch((err) => {
+          if (!auth.currentUser || !isFirebaseAdmin || logoFile) throw err;
+          return null;
+        });
+        if (res?.siteSettings) {
+          nextBranding = res.siteSettings;
+        }
       }
-      const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/site-logo', {
-        method: 'POST',
-        body: formData,
-      });
-      onBrandingUpdated(res.siteSettings);
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveSiteSettingsToFirestore(nextBranding);
+      }
+      onBrandingUpdated(nextBranding);
       if (logoPreviewUrl) {
         URL.revokeObjectURL(logoPreviewUrl);
       }
       setLogoFile(null);
       setLogoPreviewUrl('');
-      onToast('Logo NMC, identitas header, dan teks footer berhasil diperbarui.', 'success');
+      onToast('Logo NMC, identitas header, dan teks footer berhasil disimpan ke Cloud.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memperbarui logo & footer.', 'error');
     } finally {
@@ -551,12 +749,25 @@ export function AdminSection({
   const handleResetBranding = async () => {
     setSavingBranding(true);
     try {
-      const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/site-logo', {
-        method: 'POST',
-        body: JSON.stringify({ reset: 'true' }),
-      });
-      onBrandingUpdated(res.siteSettings);
-      setBrandNameInput(res.siteSettings.brandName);
+      let nextBranding: SiteBranding = {
+        ...siteBranding,
+        brandName: 'Multimedia',
+        logoUrl: '',
+        footerAddress:
+          'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215',
+      };
+      if (getStoredToken()) {
+        const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/site-logo', {
+          method: 'POST',
+          body: JSON.stringify({ reset: 'true' }),
+        }).catch(() => null);
+        if (res?.siteSettings) nextBranding = res.siteSettings;
+      }
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveSiteSettingsToFirestore(nextBranding);
+      }
+      onBrandingUpdated(nextBranding);
+      setBrandNameInput(nextBranding.brandName);
       if (logoPreviewUrl) {
         URL.revokeObjectURL(logoPreviewUrl);
       }
@@ -574,12 +785,22 @@ export function AdminSection({
     e.preventDefault();
     setSavingSocial(true);
     try {
-      const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/social-links', {
-        method: 'POST',
-        body: JSON.stringify({ socialLinks: socialLinksInput }),
-      });
-      onBrandingUpdated(res.siteSettings);
-      onToast('Ikon siluet dan tautan media sosial footer berhasil disimpan.', 'success');
+      let nextBranding: SiteBranding = {
+        ...siteBranding,
+        socialLinks: socialLinksInput,
+      };
+      if (getStoredToken()) {
+        const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/social-links', {
+          method: 'POST',
+          body: JSON.stringify({ socialLinks: socialLinksInput }),
+        }).catch(() => null);
+        if (res?.siteSettings) nextBranding = res.siteSettings;
+      }
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveSiteSettingsToFirestore(nextBranding);
+      }
+      onBrandingUpdated(nextBranding);
+      onToast('Ikon siluet dan tautan media sosial footer berhasil disimpan ke Cloud.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menyimpan media sosial.', 'error');
     } finally {
@@ -590,13 +811,28 @@ export function AdminSection({
   const handleResetSocialLinks = async () => {
     setSavingSocial(true);
     try {
-      const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/social-links', {
-        method: 'POST',
-        body: JSON.stringify({ reset: true }),
-      });
-      onBrandingUpdated(res.siteSettings);
-      if (res.siteSettings.socialLinks) {
-        setSocialLinksInput(res.siteSettings.socialLinks);
+      const defaultSocial: SocialLinkItem[] = [
+        { id: 'ig', platform: 'instagram', label: 'Instagram', url: 'https://instagram.com' },
+        { id: 'tt', platform: 'tiktok', label: 'TikTok', url: 'https://tiktok.com' },
+        { id: 'yt', platform: 'youtube', label: 'YouTube', url: 'https://youtube.com' },
+      ];
+      let nextBranding: SiteBranding = {
+        ...siteBranding,
+        socialLinks: defaultSocial,
+      };
+      if (getStoredToken()) {
+        const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/social-links', {
+          method: 'POST',
+          body: JSON.stringify({ reset: true }),
+        }).catch(() => null);
+        if (res?.siteSettings) nextBranding = res.siteSettings;
+      }
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveSiteSettingsToFirestore(nextBranding);
+      }
+      onBrandingUpdated(nextBranding);
+      if (nextBranding.socialLinks) {
+        setSocialLinksInput(nextBranding.socialLinks);
       }
       onToast('Tautan media sosial dikembalikan ke Instagram, TikTok, dan YouTube bawaan.', 'info');
     } catch (err) {
@@ -630,24 +866,39 @@ export function AdminSection({
     e.preventDefault();
     setSavingHero(true);
     try {
-      const formData = new FormData();
-      formData.append('heroEyebrow', heroEyebrowInput);
-      formData.append('heroTitle', heroTitleInput);
-      formData.append('heroDescription', heroDescInput);
-      if (heroImageFile) {
-        formData.append('heroImage', heroImageFile);
+      let nextBranding: SiteBranding = {
+        ...siteBranding,
+        heroEyebrow: heroEyebrowInput,
+        heroTitle: heroTitleInput,
+        heroDescription: heroDescInput,
+      };
+      if (getStoredToken()) {
+        const formData = new FormData();
+        formData.append('heroEyebrow', heroEyebrowInput);
+        formData.append('heroTitle', heroTitleInput);
+        formData.append('heroDescription', heroDescInput);
+        if (heroImageFile) {
+          formData.append('heroImage', heroImageFile);
+        }
+        const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/hero-settings', {
+          method: 'POST',
+          body: formData,
+        }).catch((err) => {
+          if (!auth.currentUser || !isFirebaseAdmin || heroImageFile) throw err;
+          return null;
+        });
+        if (res?.siteSettings) nextBranding = res.siteSettings;
       }
-      const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/hero-settings', {
-        method: 'POST',
-        body: formData,
-      });
-      onBrandingUpdated(res.siteSettings);
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveSiteSettingsToFirestore(nextBranding);
+      }
+      onBrandingUpdated(nextBranding);
       if (heroPreviewUrl) {
         URL.revokeObjectURL(heroPreviewUrl);
       }
       setHeroImageFile(null);
       setHeroPreviewUrl('');
-      onToast('Tampilan Hero Beranda berhasil diperbarui.', 'success');
+      onToast('Tampilan Hero Beranda berhasil disimpan ke Cloud.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menyimpan pengaturan Hero Beranda.', 'error');
     } finally {
@@ -658,11 +909,25 @@ export function AdminSection({
   const handleResetHero = async () => {
     setSavingHero(true);
     try {
-      const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/hero-settings', {
-        method: 'POST',
-        body: JSON.stringify({ reset: 'true' }),
-      });
-      onBrandingUpdated(res.siteSettings);
+      let nextBranding: SiteBranding = {
+        ...siteBranding,
+        heroEyebrow: 'SMP Negeri 2 Ciamis · Ekstrakurikuler Resmi',
+        heroTitle: 'Nedacis Media Center: Ruang Berkarya & Jurnalisme Siswa SMPN 2 Ciamis',
+        heroDescription:
+          'Wadah resmi siswa SMPN 2 Ciamis dalam bidang fotografi, videografi, penyiaran, desain grafis, dan jurnalistik sekolah—dilengkapi arsip karya digital serta sistem absensi kartu pelajar NFC/RFID dan QR Code secara real-time.',
+        heroImageUrl: '',
+      };
+      if (getStoredToken()) {
+        const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/hero-settings', {
+          method: 'POST',
+          body: JSON.stringify({ reset: 'true' }),
+        }).catch(() => null);
+        if (res?.siteSettings) nextBranding = res.siteSettings;
+      }
+      if (auth.currentUser && isFirebaseAdmin) {
+        await saveSiteSettingsToFirestore(nextBranding);
+      }
+      onBrandingUpdated(nextBranding);
       if (heroPreviewUrl) {
         URL.revokeObjectURL(heroPreviewUrl);
       }
@@ -719,23 +984,73 @@ export function AdminSection({
     }
     setCreatingTask(true);
     try {
-      const res = await apiFetch<{ task: AdminLmsTask }>('/api/admin/tasks', {
-        method: 'POST',
-        body: JSON.stringify({
+      let createdTask: AdminLmsTask | null = null;
+      if (auth.currentUser && isFirebaseAdmin) {
+        const fId = await createLmsTaskInFirestore({
           title: taskTitle.trim(),
           description: taskDesc.trim(),
           division: taskDivision,
-          points_reward: Number(taskPoints) || 100,
-          due_date: taskDueDate,
+          pointsReward: Number(taskPoints) || 100,
+          dueDate: taskDueDate,
+          creatorName: 'Pembina MMC',
           stages: draftStages.map((s) => ({
             stage_type: s.stage_type,
             title: s.title,
             content: s.content,
             attachment_url: s.attachment_url,
           })),
-        }),
-      });
-      setAdminTasks((prev) => [res.task, ...prev]);
+        });
+        const taskNumId = Date.now();
+        createdTask = {
+          id: taskNumId,
+          firestoreId: fId,
+          title: taskTitle.trim(),
+          description: taskDesc.trim(),
+          division: taskDivision,
+          points_reward: Number(taskPoints) || 100,
+          due_date: taskDueDate,
+          is_published: 1,
+          created_by: 0,
+          creator_name: 'Pembina MMC',
+          created_at: new Date().toISOString(),
+          stages: draftStages.map((s, idx) => ({
+            id: taskNumId + idx + 1,
+            task_id: taskNumId,
+            stage_order: idx + 1,
+            stage_type: s.stage_type,
+            title: s.title,
+            content: s.content,
+            attachment_url: s.attachment_url,
+            created_at: new Date().toISOString(),
+          })),
+          submissions: [],
+        };
+      }
+      if (getStoredToken()) {
+        const res = await apiFetch<{ task: AdminLmsTask }>('/api/admin/tasks', {
+          method: 'POST',
+          body: JSON.stringify({
+            title: taskTitle.trim(),
+            description: taskDesc.trim(),
+            division: taskDivision,
+            points_reward: Number(taskPoints) || 100,
+            due_date: taskDueDate,
+            stages: draftStages.map((s) => ({
+              stage_type: s.stage_type,
+              title: s.title,
+              content: s.content,
+              attachment_url: s.attachment_url,
+            })),
+          }),
+        }).catch((err) => {
+          if (!createdTask) throw err;
+          return null;
+        });
+        if (res?.task && !createdTask) createdTask = res.task;
+      }
+      if (createdTask) {
+        setAdminTasks((prev) => [createdTask!, ...prev]);
+      }
       setTaskTitle('');
       setTaskDesc('');
       setTaskDueDate('');
@@ -750,10 +1065,15 @@ export function AdminSection({
     }
   };
 
-  const handleDeleteLmsTask = async (taskId: number) => {
+  const handleDeleteLmsTask = async (task: AdminLmsTask) => {
     try {
-      await apiFetch(`/api/admin/tasks/${taskId}`, { method: 'DELETE' });
-      setAdminTasks((prev) => prev.filter((t) => t.id !== taskId));
+      if (auth.currentUser && isFirebaseAdmin && task.firestoreId) {
+        await deleteLmsTaskInFirestore(task.firestoreId);
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/admin/tasks/${task.id}`, { method: 'DELETE' }).catch(() => {});
+      }
+      setAdminTasks((prev) => prev.filter((t) => t.id !== task.id));
       onTasksChanged?.();
       onToast('Tugas LMS telah dihapus.', 'info');
     } catch (err) {
@@ -771,14 +1091,24 @@ export function AdminSection({
       const nextPoints =
         status === 'revision' ? 0 : subPoints[sub.id] ?? sub.points_awarded ?? task.points_reward;
       const feedback = subFeedback[sub.id] ?? sub.admin_feedback ?? '';
-      await apiFetch(`/api/admin/task-submissions/${sub.id}/review`, {
-        method: 'POST',
-        body: JSON.stringify({
+      if (auth.currentUser && isFirebaseAdmin && sub.firestoreId) {
+        await reviewLmsSubmissionInFirestore({
+          submissionId: sub.firestoreId,
           status,
-          points_awarded: nextPoints,
-          admin_feedback: feedback,
-        }),
-      });
+          pointsAwarded: nextPoints,
+          adminFeedback: feedback,
+        });
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/admin/task-submissions/${sub.id}/review`, {
+          method: 'POST',
+          body: JSON.stringify({
+            status,
+            points_awarded: nextPoints,
+            admin_feedback: feedback,
+          }),
+        }).catch(() => {});
+      }
       await loadAdminTasks();
       onTasksChanged?.();
       onMembersChanged();
@@ -799,13 +1129,23 @@ export function AdminSection({
     setReviewingId(work.id);
     try {
       const note = reviewNotes[work.id] || '';
-      const res = await apiFetch<{ work: StudentWork }>(`/api/admin/works/${work.id}/review`, {
-        method: 'POST',
-        body: JSON.stringify({ decision, note }),
-      });
+      let approvedWork: StudentWork | null = null;
+      if (auth.currentUser && isFirebaseAdmin && work.firestoreId) {
+        await reviewWorkInFirestore(work.firestoreId, decision, note);
+        if (decision === 'approved') {
+          approvedWork = { ...work, approval_status: 'approved', review_note: note };
+        }
+      }
+      if (getStoredToken()) {
+        const res = await apiFetch<{ work: StudentWork }>(`/api/admin/works/${work.id}/review`, {
+          method: 'POST',
+          body: JSON.stringify({ decision, note }),
+        }).catch(() => null);
+        if (res?.work && !approvedWork) approvedWork = res.work;
+      }
       setPendingWorks((prev) => prev.filter((w) => w.id !== work.id));
-      if (decision === 'approved' && res.work) {
-        onWorkApproved(res.work);
+      if (decision === 'approved' && approvedWork) {
+        onWorkApproved(approvedWork);
         onToast(`Karya "${work.title}" disetujui dan langsung terposting di Beranda & Galeri.`, 'success');
       } else {
         onToast(`Karya "${work.title}" ditolak dan pemberitahuan dikirim ke siswa.`, 'info');
@@ -1053,6 +1393,18 @@ export function AdminSection({
           >
             <ImageIcon className="w-4 h-4" />
             Logo &amp; Footer
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('database')}
+            className={`inline-flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+              tab === 'database'
+                ? 'border-[#B91C1C] text-[#B91C1C] font-semibold'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Database className="w-4 h-4" />
+            Database &amp; Backup
           </button>
         </div>
 
@@ -1801,7 +2153,7 @@ export function AdminSection({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleDeleteLmsTask(t.id)}
+                                onClick={() => handleDeleteLmsTask(t)}
                                 title="Hapus tugas LMS"
                                 className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg"
                               >
@@ -1968,7 +2320,7 @@ export function AdminSection({
                     <span className="font-mono text-slate-800">{bw.word}</span>
                     <button
                       type="button"
-                      onClick={() => handleRemoveBlockedWord(bw.id)}
+                      onClick={() => handleRemoveBlockedWord(bw)}
                       className="text-xs text-rose-600 hover:underline"
                     >
                       Hapus
@@ -2458,6 +2810,220 @@ export function AdminSection({
               </div>
             </form>
             </>
+          )}
+
+          {tab === 'database' && (
+            <div className="space-y-6">
+              {/* Cloud Firestore Cross-Device Sync Banner */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-blue-50/70 border border-blue-200 rounded-xl">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                    <Cloud className="w-4 h-4 text-[#1D4ED8]" />
+                    Cloud Firestore Real-Time Sync ({isFirebaseAdmin ? 'Terhubung Admin Google' : 'Belum Terhubung Google Admin'})
+                  </p>
+                  <p className="text-xs text-slate-600">
+                    {isFirebaseAdmin
+                      ? `Akun ${firebaseEmail || 'Admin Google'} aktif. Semua perubahan otomatis tersimpan di Cloud Firestore (${cloudSeeded ? 'Data Cloud Aktif' : 'Siap Disinkronkan'}) dan dapat diakses dari semua browser/perangkat.`
+                      : 'Masuk dengan Google (NedacisMC@gmail.com) agar perubahan tersimpan ke Cloud Firestore dan muncul di semua browser/perangkat.'}
+                  </p>
+                </div>
+                {onSyncCloudNow && isFirebaseAdmin && (
+                  <button
+                    type="button"
+                    disabled={syncingCloud}
+                    onClick={async () => {
+                      setSyncingCloud(true);
+                      try {
+                        await onSyncCloudNow();
+                      } finally {
+                        setSyncingCloud(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-[#1D4ED8] hover:bg-[#1E40AF] text-white rounded-xl whitespace-nowrap shrink-0 disabled:opacity-60"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${syncingCloud ? 'animate-spin' : ''}`} />
+                    {syncingCloud ? 'Menyinkronkan...' : 'Sinkronkan ke Cloud Firestore'}
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-emerald-700" />
+                    Penyimpanan SQLite Terproteksi (WAL + Synchronous FULL + Auto-Backup)
+                  </p>
+                  <p className="text-xs text-slate-600">
+                    Setiap perubahan data dicatat dalam transaksi atomik, di-checkpoint ke berkas utama <span className="font-mono">.db</span>, dan dicadangkan otomatis secara berkala serta saat server berhenti.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={loadingDbHealth}
+                  onClick={loadDbHealth}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-xl whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingDbHealth ? 'animate-spin' : ''}`} />
+                  Periksa Status
+                </button>
+              </div>
+
+              {dbHealth ? (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                      <p className="text-xs text-slate-500">Integritas Database</p>
+                      <p className="text-lg font-semibold text-emerald-700 uppercase">
+                        {dbHealth.integrity === 'ok' ? 'OK (Sehat)' : dbHealth.integrity}
+                      </p>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        {dbHealth.journalMode.toUpperCase()} · SYNC {dbHealth.synchronous}
+                      </p>
+                    </div>
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                      <p className="text-xs text-slate-500">Ukuran Berkas Utama (.db)</p>
+                      <p className="text-lg font-semibold text-slate-900 font-mono tabular-nums">
+                        {(dbHealth.dbBytes / 1024).toFixed(1)} KB
+                      </p>
+                      <p className="text-[11px] font-mono text-slate-500">
+                        WAL tertunda: {(dbHealth.walBytes / 1024).toFixed(1)} KB
+                      </p>
+                    </div>
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                      <p className="text-xs text-slate-500">Backup Terverifikasi</p>
+                      <p className="text-lg font-semibold text-slate-900 font-mono tabular-nums">
+                        {dbHealth.lastBackupBytes > 0
+                          ? `${(dbHealth.lastBackupBytes / 1024).toFixed(1)} KB`
+                          : 'Belum ada'}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {dbHealth.lastBackupAt ? formatTimeAgo(dbHealth.lastBackupAt) : 'Klik simpan sekarang'}
+                      </p>
+                    </div>
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                      <p className="text-xs text-slate-500">Total Rekaman Tersimpan</p>
+                      <p className="text-lg font-semibold text-slate-900 font-mono tabular-nums">
+                        {Object.values(dbHealth.counts).reduce((a, b) => a + b, 0)} baris
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {dbHealth.counts.users} akun · {dbHealth.counts.works} karya · {dbHealth.counts.attendance_records} absensi
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-xl p-4 space-y-3">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      Ringkasan Tabel Tersimpan
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-xs">
+                      {[
+                        ['Pengguna & Pembina', dbHealth.counts.users],
+                        ['Karya Siswa', dbHealth.counts.works],
+                        ['Catatan Absensi', dbHealth.counts.attendance_records],
+                        ['Tugas LMS', dbHealth.counts.lms_tasks],
+                        ['Pengumpulan LMS', dbHealth.counts.lms_task_submissions],
+                        ['Berita Liputan', dbHealth.counts.news_articles],
+                        ['Jadwal Kegiatan', dbHealth.counts.schedules],
+                        ['Notifikasi', dbHealth.counts.notifications],
+                        ['Pengaturan Situs', dbHealth.counts.site_settings],
+                      ].map(([label, cnt]) => (
+                        <div key={String(label)} className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-2">
+                          <span className="text-slate-600 truncate">{label}</span>
+                          <span className="font-mono font-semibold text-slate-900 tabular-nums">{cnt}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="p-8 text-center text-sm text-slate-500 border border-slate-200 rounded-xl">
+                  Memuat status kesehatan database...
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  disabled={runningCheckpoint}
+                  onClick={async () => {
+                    setRunningCheckpoint(true);
+                    try {
+                      const res = await apiFetch<{ health: DbHealthState }>('/api/admin/database/checkpoint', {
+                        method: 'POST',
+                      });
+                      setDbHealth(res.health);
+                      onToast('Database berhasil di-flush (WAL Truncate) dan backup terbaru dibuat.', 'success');
+                    } catch (err) {
+                      onToast(err instanceof Error ? err.message : 'Gagal menjalankan checkpoint database.', 'error');
+                    } finally {
+                      setRunningCheckpoint(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 rounded-xl"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  {runningCheckpoint ? 'Menyimpan...' : 'Flush WAL & Simpan Backup Sekarang'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const token = getStoredToken();
+                      const res = await fetch('/api/admin/database/export', {
+                        headers: token ? { Authorization: `Bearer ${token}` } : {},
+                      });
+                      if (!res.ok) throw new Error('Gagal mengunduh berkas database.');
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `mmc_smpn2_ciamis_backup_${new Date().toISOString().slice(0, 10)}.db`;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                      onToast('Berkas backup SQLite (.db) berhasil diunduh.', 'success');
+                    } catch (err) {
+                      onToast(err instanceof Error ? err.message : 'Gagal mengunduh backup.', 'error');
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-xl"
+                >
+                  <Download className="w-4 h-4" />
+                  Unduh Backup SQLite (.db)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const token = getStoredToken();
+                      const res = await fetch('/api/admin/database/export-json', {
+                        headers: token ? { Authorization: `Bearer ${token}` } : {},
+                      });
+                      if (!res.ok) throw new Error('Gagal mengunduh arsip JSON.');
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `mmc_smpn2_ciamis_backup_${new Date().toISOString().slice(0, 10)}.json`;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                      onToast('Arsip data lengkap (.json) berhasil diunduh.', 'success');
+                    } catch (err) {
+                      onToast(err instanceof Error ? err.message : 'Gagal mengunduh JSON.', 'error');
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl"
+                >
+                  <Download className="w-4 h-4" />
+                  Unduh Arsip JSON
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>

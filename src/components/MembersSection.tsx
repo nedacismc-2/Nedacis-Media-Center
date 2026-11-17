@@ -18,12 +18,16 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { AttendanceRecord, LmsTask, StudentProfile, StudentWork } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getStoredToken } from '../lib/api';
+import { auth } from '../lib/firebase';
+import { createWorkInFirestore, updateMemberAvatarInFirestore } from '../lib/firestoreSync';
 import { formatDateID, getInitials, getLocalTimeZoneLabel, resolveMediaUrl } from '../lib/mediaAssets';
 import { QrCodeDisplay } from './QrCodeDisplay';
 
 interface MembersSectionProps {
   members: StudentProfile[];
+  allWorks?: StudentWork[];
+  allAttendance?: AttendanceRecord[];
   currentUser: StudentProfile | null;
   lmsTasks?: LmsTask[];
   selectedUsername: string | null;
@@ -40,6 +44,8 @@ const DIVISIONS = ['Semua', 'Pembina', 'Fotografi', 'Videografi', 'Jurnalistik',
 
 export function MembersSection({
   members,
+  allWorks = [],
+  allAttendance = [],
   currentUser,
   lmsTasks = [],
   selectedUsername,
@@ -83,15 +89,39 @@ export function MembersSection({
       return;
     }
     let active = true;
-    setLoadingProfile(true);
+    const cloudMember = members.find(
+      (m) => m.username.toLowerCase() === selectedUsername.toLowerCase()
+    );
+    const cloudWorks = allWorks.filter(
+      (w) => w.author_username.toLowerCase() === selectedUsername.toLowerCase()
+    );
+    const cloudAtt = allAttendance.filter(
+      (a) => a.username.toLowerCase() === selectedUsername.toLowerCase()
+    );
+
+    if (cloudMember) {
+      setProfileDetail({
+        member: cloudMember,
+        attendanceHistory: cloudAtt,
+        works: cloudWorks,
+      });
+    } else {
+      setLoadingProfile(true);
+    }
+
     apiFetch<{ member: StudentProfile; attendanceHistory: AttendanceRecord[]; works: StudentWork[] }>(
       `/api/members/${encodeURIComponent(selectedUsername)}`
     )
       .then((res) => {
-        if (active) setProfileDetail(res);
+        if (!active) return;
+        setProfileDetail({
+          member: cloudMember ? { ...res.member, ...cloudMember, nis: cloudMember.nis || res.member.nis } : res.member,
+          attendanceHistory: cloudAtt.length > 0 ? cloudAtt : res.attendanceHistory,
+          works: cloudWorks.length > 0 ? cloudWorks : res.works,
+        });
       })
       .catch(() => {
-        if (active) setProfileDetail(null);
+        if (active && !cloudMember) setProfileDetail(null);
       })
       .finally(() => {
         if (active) setLoadingProfile(false);
@@ -99,12 +129,17 @@ export function MembersSection({
     return () => {
       active = false;
     };
-  }, [selectedUsername, currentUser?.id]);
+  }, [selectedUsername, currentUser?.id, members, allWorks, allAttendance]);
 
   // Real-time update of attendance history when student taps NFC or QR is scanned!
   useEffect(() => {
     if (!latestAttendanceEvent || !profileDetail) return;
-    if (latestAttendanceEvent.user_id !== profileDetail.member.id) return;
+    if (
+      latestAttendanceEvent.user_id !== profileDetail.member.id &&
+      latestAttendanceEvent.username !== profileDetail.member.username
+    ) {
+      return;
+    }
 
     setProfileDetail((prev) => {
       if (!prev) return prev;
@@ -117,7 +152,7 @@ export function MembersSection({
           : [latestAttendanceEvent, ...prev.attendanceHistory];
       return { ...prev, attendanceHistory: updatedHistory };
     });
-  }, [latestAttendanceEvent, profileDetail?.member.id]);
+  }, [latestAttendanceEvent, profileDetail?.member.id, profileDetail?.member.username]);
 
   const handleAvatarChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -130,14 +165,24 @@ export function MembersSection({
 
     setUploadingAvatar(true);
     try {
-      const formData = new FormData();
-      formData.append('avatar', file);
-      const res = await apiFetch<{ user: StudentProfile }>('/api/profile/avatar', {
-        method: 'POST',
-        body: formData,
-      });
-      setProfileDetail((prev) => (prev ? { ...prev, member: res.user } : prev));
-      onUserUpdated(res.user);
+      let updatedUser: StudentProfile | null = null;
+      if (getStoredToken()) {
+        const formData = new FormData();
+        formData.append('avatar', file);
+        const res = await apiFetch<{ user: StudentProfile }>('/api/profile/avatar', {
+          method: 'POST',
+          body: formData,
+        });
+        updatedUser = res.user;
+      }
+      if (auth.currentUser && profileDetail?.member.firestoreId && updatedUser?.avatar_url) {
+        await updateMemberAvatarInFirestore(profileDetail.member.firestoreId, updatedUser.avatar_url);
+      }
+      if (!updatedUser) {
+        throw new Error('Masuk dengan Akun Portal terlebih dahulu untuk mengunggah foto profil.');
+      }
+      setProfileDetail((prev) => (prev ? { ...prev, member: updatedUser! } : prev));
+      onUserUpdated(updatedUser);
       onToast('Foto profil berhasil diperbarui.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memperbarui foto profil.', 'error');
@@ -170,6 +215,24 @@ export function MembersSection({
         method: 'POST',
         body: formData,
       });
+
+      if (auth.currentUser && currentUser) {
+        await createWorkInFirestore({
+          title: workTitle.trim(),
+          description: workDesc.trim(),
+          category: workCategory,
+          mediaType: res.work.media_type,
+          mediaUrl: res.work.media_url,
+          authorName: currentUser.full_name,
+          authorUsername: currentUser.username,
+          authorKelas: currentUser.kelas,
+          authorDivision: currentUser.division,
+          authorAvatarColor: currentUser.avatar_color,
+          authorAvatarUrl: currentUser.avatar_url || '',
+          isAdminUploader: currentUser.role === 'admin',
+        }).catch(() => {});
+      }
+
       setProfileDetail((prev) => (prev ? { ...prev, works: [res.work, ...prev.works] } : prev));
       if (!res.pendingApproval) {
         onWorkApprovedOrAdminCreated(res.work);
@@ -218,7 +281,9 @@ export function MembersSection({
     }
 
     const { member, attendanceHistory, works } = profileDetail;
-    const isOwnProfile = Boolean(currentUser && currentUser.id === member.id);
+    const isOwnProfile = Boolean(
+      currentUser && (currentUser.id === member.id || currentUser.username === member.username)
+    );
     const profileQrUrl = `${window.location.origin}/#profil/${member.username}`;
     const hadirCount = attendanceHistory.filter((a) => a.status === 'Hadir' || a.status === 'Terlambat').length;
 

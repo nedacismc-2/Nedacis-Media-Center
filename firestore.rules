@@ -1,0 +1,969 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== GLOBAL HELPERS ====================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isBootstrapAdminEmail() {
+      return isVerifiedUser()
+        && request.auth.token.email is string
+        && (
+          request.auth.token.email == 'NedacisMC@gmail.com'
+          || request.auth.token.email == 'nedacismc@gmail.com'
+        );
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        isBootstrapAdminEmail()
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // ==================== VALIDATION BLUEPRINTS ====================
+    function isValidAdminMarker(data) {
+      return data.keys().hasAll(['uid', 'email', 'grantedBy', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'grantedBy', 'createdAt'])
+        && isValidId(data.uid)
+        && isStr(data.email, 3, 160)
+        && isStr(data.grantedBy, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'role', 'linkedMemberId', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && isStr(data.email, 3, 160)
+        && isStr(data.displayName, 1, 120)
+        && (!('photoURL' in data) || isStr(data.photoURL, 0, 500))
+        && (data.role in ['member', 'admin'])
+        && (!('linkedMemberId' in data) || isStr(data.linkedMemberId, 0, 128))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSiteSettingsPortal(data) {
+      return data.keys().hasAll(['brandName', 'heroTitle', 'footerAddress', 'socialLinks', 'updatedByUid', 'updatedAt'])
+        && data.keys().hasOnly([
+          'brandName',
+          'logoUrl',
+          'heroEyebrow',
+          'heroTitle',
+          'heroDescription',
+          'heroImageUrl',
+          'footerAddress',
+          'socialLinks',
+          'updatedByUid',
+          'updatedAt'
+        ])
+        && isStr(data.brandName, 1, 60)
+        && (!('logoUrl' in data) || isStr(data.logoUrl, 0, 500))
+        && (!('heroEyebrow' in data) || isStr(data.heroEyebrow, 0, 120))
+        && isStr(data.heroTitle, 1, 160)
+        && (!('heroDescription' in data) || isStr(data.heroDescription, 0, 600))
+        && (!('heroImageUrl' in data) || isStr(data.heroImageUrl, 0, 500))
+        && isStr(data.footerAddress, 0, 200)
+        && data.socialLinks is list
+        && data.socialLinks.size() <= 12
+        && (data.socialLinks.size() == 0 || data.socialLinks[0] is map)
+        && isStr(data.updatedByUid, 1, 128)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMemberPublic(data) {
+      return data.keys().hasAll([
+          'username',
+          'role',
+          'fullName',
+          'kelas',
+          'division',
+          'qrCodeToken',
+          'avatarColor',
+          'isVisible',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'legacyId',
+          'username',
+          'role',
+          'fullName',
+          'kelas',
+          'division',
+          'bio',
+          'qrCodeToken',
+          'avatarColor',
+          'avatarUrl',
+          'showInMembers',
+          'isVisible',
+          'ownerUid',
+          'attendanceCount',
+          'worksCount',
+          'lmsPoints',
+          'createdAt',
+          'updatedAt'
+        ])
+        && (!('legacyId' in data) || data.legacyId is number)
+        && isStr(data.username, 2, 60)
+        && data.username.matches('^[a-zA-Z0-9._-]+$')
+        && (data.role in ['admin', 'student'])
+        && isStr(data.fullName, 1, 120)
+        && isStr(data.kelas, 1, 30)
+        && isStr(data.division, 1, 40)
+        && (!('bio' in data) || isStr(data.bio, 0, 400))
+        && isStr(data.qrCodeToken, 2, 60)
+        && isStr(data.avatarColor, 4, 16)
+        && (!('avatarUrl' in data) || isStr(data.avatarUrl, 0, 500))
+        && (!('showInMembers' in data) || data.showInMembers is bool)
+        && data.isVisible is bool
+        && (!('ownerUid' in data) || isStr(data.ownerUid, 0, 128))
+        && (!('attendanceCount' in data) || (data.attendanceCount is number && data.attendanceCount >= 0))
+        && (!('worksCount' in data) || (data.worksCount is number && data.worksCount >= 0))
+        && (!('lmsPoints' in data) || (data.lmsPoints is number && data.lmsPoints >= 0))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMemberPrivate(data) {
+      return data.keys().hasAll(['memberId', 'nis', 'nfcUid', 'updatedAt'])
+        && data.keys().hasOnly(['memberId', 'ownerUid', 'nis', 'nfcUid', 'email', 'updatedAt'])
+        && isValidId(data.memberId)
+        && (!('ownerUid' in data) || isStr(data.ownerUid, 0, 128))
+        && isStr(data.nis, 1, 40)
+        && isStr(data.nfcUid, 2, 64)
+        && (!('email' in data) || isStr(data.email, 0, 160))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNewsArticle(data) {
+      return data.keys().hasAll([
+          'title',
+          'slug',
+          'category',
+          'summary',
+          'content',
+          'authorName',
+          'publishedAt',
+          'isPublished',
+          'createdByUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'title',
+          'slug',
+          'category',
+          'summary',
+          'content',
+          'imageUrl',
+          'authorName',
+          'publishedAt',
+          'isFeatured',
+          'isPublished',
+          'createdByUid',
+          'createdAt'
+        ])
+        && isStr(data.title, 1, 200)
+        && isStr(data.slug, 1, 140)
+        && isStr(data.category, 1, 60)
+        && isStr(data.summary, 1, 500)
+        && isStr(data.content, 1, 6000)
+        && (!('imageUrl' in data) || isStr(data.imageUrl, 0, 500))
+        && isStr(data.authorName, 1, 120)
+        && isStr(data.publishedAt, 4, 30)
+        && (!('isFeatured' in data) || data.isFeatured is bool)
+        && data.isPublished is bool
+        && isStr(data.createdByUid, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidScheduleEvent(data) {
+      return data.keys().hasAll([
+          'title',
+          'division',
+          'eventDate',
+          'startTime',
+          'endTime',
+          'location',
+          'mentor',
+          'isPublished',
+          'createdByUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'title',
+          'division',
+          'eventDate',
+          'startTime',
+          'endTime',
+          'location',
+          'description',
+          'mentor',
+          'reminderSent',
+          'isPublished',
+          'createdByUid',
+          'createdAt'
+        ])
+        && isStr(data.title, 1, 180)
+        && isStr(data.division, 1, 60)
+        && isStr(data.eventDate, 8, 20)
+        && isStr(data.startTime, 4, 12)
+        && isStr(data.endTime, 4, 12)
+        && isStr(data.location, 1, 160)
+        && (!('description' in data) || isStr(data.description, 0, 800))
+        && isStr(data.mentor, 1, 120)
+        && (!('reminderSent' in data) || data.reminderSent is bool)
+        && data.isPublished is bool
+        && isStr(data.createdByUid, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidStudentWork(data) {
+      return data.keys().hasAll([
+          'authorUid',
+          'authorName',
+          'authorUsername',
+          'title',
+          'category',
+          'mediaType',
+          'mediaUrl',
+          'sharesCount',
+          'likesCount',
+          'commentsCount',
+          'commentsDisabled',
+          'approvalStatus',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'authorUid',
+          'authorMemberId',
+          'authorName',
+          'authorUsername',
+          'authorKelas',
+          'authorDivision',
+          'authorAvatarColor',
+          'authorAvatarUrl',
+          'title',
+          'description',
+          'category',
+          'mediaType',
+          'mediaUrl',
+          'sharesCount',
+          'likesCount',
+          'commentsCount',
+          'commentsDisabled',
+          'approvalStatus',
+          'reviewNote',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isStr(data.authorUid, 1, 128)
+        && (!('authorMemberId' in data) || isStr(data.authorMemberId, 0, 128))
+        && isStr(data.authorName, 1, 120)
+        && isStr(data.authorUsername, 1, 60)
+        && (!('authorKelas' in data) || isStr(data.authorKelas, 0, 30))
+        && (!('authorDivision' in data) || isStr(data.authorDivision, 0, 40))
+        && (!('authorAvatarColor' in data) || isStr(data.authorAvatarColor, 0, 16))
+        && (!('authorAvatarUrl' in data) || isStr(data.authorAvatarUrl, 0, 500))
+        && isStr(data.title, 1, 140)
+        && (!('description' in data) || isStr(data.description, 0, 600))
+        && isStr(data.category, 1, 60)
+        && (data.mediaType in ['image', 'video'])
+        && isStr(data.mediaUrl, 1, 500)
+        && data.sharesCount is number && data.sharesCount >= 0
+        && data.likesCount is number && data.likesCount >= 0
+        && data.commentsCount is number && data.commentsCount >= 0
+        && data.commentsDisabled is bool
+        && (data.approvalStatus in ['pending', 'approved', 'rejected'])
+        && (!('reviewNote' in data) || isStr(data.reviewNote, 0, 300))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkComment(data) {
+      return data.keys().hasAll([
+          'workId',
+          'authorUid',
+          'authorName',
+          'authorUsername',
+          'content',
+          'isHidden',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'workId',
+          'authorUid',
+          'authorName',
+          'authorUsername',
+          'authorKelas',
+          'authorRole',
+          'content',
+          'isHidden',
+          'createdAt'
+        ])
+        && isValidId(data.workId)
+        && isStr(data.authorUid, 1, 128)
+        && isStr(data.authorName, 1, 120)
+        && isStr(data.authorUsername, 1, 60)
+        && (!('authorKelas' in data) || isStr(data.authorKelas, 0, 30))
+        && (!('authorRole' in data) || (data.authorRole in ['admin', 'student']))
+        && isStr(data.content, 1, 500)
+        && data.isHidden is bool
+        && data.createdAt is timestamp;
+    }
+
+    function isValidWorkLike(data) {
+      return data.keys().hasAll(['workId', 'userUid', 'createdAt'])
+        && data.keys().hasOnly(['workId', 'userUid', 'createdAt'])
+        && isValidId(data.workId)
+        && isStr(data.userUid, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAttendanceRecord(data) {
+      return data.keys().hasAll([
+          'memberId',
+          'fullName',
+          'username',
+          'attendanceDate',
+          'checkInTime',
+          'method',
+          'status',
+          'sessionTitle',
+          'recordedBy',
+          'recordedByUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'memberId',
+          'studentUid',
+          'fullName',
+          'username',
+          'kelas',
+          'division',
+          'attendanceDate',
+          'checkInTime',
+          'method',
+          'status',
+          'sessionTitle',
+          'recordedBy',
+          'recordedByUid',
+          'createdAt'
+        ])
+        && isValidId(data.memberId)
+        && (!('studentUid' in data) || isStr(data.studentUid, 0, 128))
+        && isStr(data.fullName, 1, 120)
+        && isStr(data.username, 1, 60)
+        && (!('kelas' in data) || isStr(data.kelas, 0, 30))
+        && (!('division' in data) || isStr(data.division, 0, 40))
+        && isStr(data.attendanceDate, 8, 20)
+        && isStr(data.checkInTime, 4, 20)
+        && (data.method in ['NFC/RFID', 'QR Scan', 'Manual Admin'])
+        && (data.status in ['Hadir', 'Terlambat', 'Izin'])
+        && isStr(data.sessionTitle, 1, 180)
+        && isStr(data.recordedBy, 1, 120)
+        && isStr(data.recordedByUid, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLmsTask(data) {
+      return data.keys().hasAll([
+          'title',
+          'division',
+          'pointsReward',
+          'isPublished',
+          'creatorName',
+          'createdByUid',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'title',
+          'description',
+          'division',
+          'pointsReward',
+          'dueDate',
+          'isPublished',
+          'creatorName',
+          'createdByUid',
+          'createdAt'
+        ])
+        && isStr(data.title, 1, 180)
+        && (!('description' in data) || isStr(data.description, 0, 1000))
+        && isStr(data.division, 1, 40)
+        && data.pointsReward is number && data.pointsReward >= 1 && data.pointsReward <= 10000
+        && (!('dueDate' in data) || isStr(data.dueDate, 0, 30))
+        && data.isPublished is bool
+        && isStr(data.creatorName, 1, 120)
+        && isStr(data.createdByUid, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLmsTaskStage(data) {
+      return data.keys().hasAll(['taskId', 'stageOrder', 'stageType', 'title', 'createdAt'])
+        && data.keys().hasOnly(['taskId', 'stageOrder', 'stageType', 'title', 'content', 'attachmentUrl', 'createdAt'])
+        && isValidId(data.taskId)
+        && data.stageOrder is number && data.stageOrder >= 1 && data.stageOrder <= 50
+        && (data.stageType in ['reading', 'practice', 'upload'])
+        && isStr(data.title, 1, 160)
+        && (!('content' in data) || isStr(data.content, 0, 4000))
+        && (!('attachmentUrl' in data) || isStr(data.attachmentUrl, 0, 500))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLmsTaskProgress(data) {
+      return data.keys().hasAll(['taskId', 'stageId', 'userUid', 'completedAt'])
+        && data.keys().hasOnly(['taskId', 'stageId', 'userUid', 'memberId', 'responseText', 'completedAt'])
+        && isValidId(data.taskId)
+        && isValidId(data.stageId)
+        && isStr(data.userUid, 1, 128)
+        && (!('memberId' in data) || isStr(data.memberId, 0, 128))
+        && (!('responseText' in data) || isStr(data.responseText, 0, 1000))
+        && data.completedAt is timestamp;
+    }
+
+    function isValidLmsTaskSubmission(data) {
+      return data.keys().hasAll([
+          'taskId',
+          'userUid',
+          'fullName',
+          'username',
+          'fileUrl',
+          'fileName',
+          'status',
+          'pointsAwarded',
+          'submittedAt'
+        ])
+        && data.keys().hasOnly([
+          'taskId',
+          'userUid',
+          'memberId',
+          'fullName',
+          'username',
+          'kelas',
+          'division',
+          'fileUrl',
+          'fileName',
+          'fileType',
+          'submissionNote',
+          'status',
+          'pointsAwarded',
+          'adminFeedback',
+          'submittedAt',
+          'reviewedAt'
+        ])
+        && isValidId(data.taskId)
+        && isStr(data.userUid, 1, 128)
+        && (!('memberId' in data) || isStr(data.memberId, 0, 128))
+        && isStr(data.fullName, 1, 120)
+        && isStr(data.username, 1, 60)
+        && (!('kelas' in data) || isStr(data.kelas, 0, 30))
+        && (!('division' in data) || isStr(data.division, 0, 40))
+        && isStr(data.fileUrl, 1, 500)
+        && isStr(data.fileName, 1, 200)
+        && (!('fileType' in data) || isStr(data.fileType, 0, 120))
+        && (!('submissionNote' in data) || isStr(data.submissionNote, 0, 1000))
+        && (data.status in ['submitted', 'approved', 'revision'])
+        && data.pointsAwarded is number && data.pointsAwarded >= 0 && data.pointsAwarded <= 10000
+        && (!('adminFeedback' in data) || isStr(data.adminFeedback, 0, 500))
+        && data.submittedAt is timestamp
+        && (!('reviewedAt' in data) || data.reviewedAt is timestamp);
+    }
+
+    function isValidBlockedWord(data) {
+      return data.keys().hasAll(['word', 'isActive', 'createdByUid', 'createdAt'])
+        && data.keys().hasOnly(['word', 'isActive', 'createdByUid', 'createdAt'])
+        && isStr(data.word, 1, 80)
+        && data.isActive is bool
+        && isStr(data.createdByUid, 1, 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['targetUid', 'type', 'title', 'message', 'isRead', 'createdAt'])
+        && data.keys().hasOnly(['targetUid', 'type', 'title', 'message', 'linkTarget', 'isRead', 'createdAt'])
+        && isStr(data.targetUid, 1, 128)
+        && (data.type in ['attendance', 'schedule', 'like', 'comment', 'share', 'moderation', 'task'])
+        && isStr(data.title, 1, 160)
+        && isStr(data.message, 1, 600)
+        && (!('linkTarget' in data) || isStr(data.linkTarget, 0, 120))
+        && data.isRead is bool
+        && data.createdAt is timestamp;
+    }
+
+    // ==================== COLLECTION RULES ====================
+
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(adminId) && isAdmin() && isValidAdminMarker(incoming()) && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId)
+        && isVerifiedUser()
+        && isValidUserAccount(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isOwner(userId) && incoming().role == 'member')
+        );
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && isValidUserAccount(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isOwner(userId)
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'linkedMemberId', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /site_settings/{settingId} {
+      allow get: if isValidId(settingId) && settingId == 'portal';
+      allow list: if false;
+      allow create: if isValidId(settingId)
+        && settingId == 'portal'
+        && isAdmin()
+        && isValidSiteSettingsPortal(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId)
+        && settingId == 'portal'
+        && isAdmin()
+        && isValidSiteSettingsPortal(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'brandName',
+          'logoUrl',
+          'heroEyebrow',
+          'heroTitle',
+          'heroDescription',
+          'heroImageUrl',
+          'footerAddress',
+          'socialLinks',
+          'updatedByUid',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    match /members_public/{memberId} {
+      allow get: if isValidId(memberId) && (existing().isVisible == true || isAdmin());
+      allow list: if existing().isVisible == true || isAdmin();
+      allow create: if isValidId(memberId)
+        && isAdmin()
+        && isValidMemberPublic(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(memberId)
+        && isVerifiedUser()
+        && isValidMemberPublic(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            existing().ownerUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['bio', 'division', 'avatarUrl', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(memberId) && isAdmin();
+    }
+
+    match /members_private/{memberId} {
+      allow get: if isValidId(memberId) && (isAdmin() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isAdmin() || (isVerifiedUser() && existing().ownerUid == request.auth.uid);
+      allow create: if isValidId(memberId)
+        && isAdmin()
+        && isValidMemberPrivate(incoming())
+        && incoming().memberId == memberId
+        && existsAfter(/databases/$(database)/documents/members_public/$(memberId))
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(memberId)
+        && isAdmin()
+        && isValidMemberPrivate(incoming())
+        && incoming().memberId == existing().memberId
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerUid', 'nis', 'nfcUid', 'email', 'updatedAt']);
+      allow delete: if isValidId(memberId) && isAdmin();
+    }
+
+    match /news_articles/{articleId} {
+      allow get: if isValidId(articleId) && (existing().isPublished == true || isAdmin());
+      allow list: if existing().isPublished == true || isAdmin();
+      allow create: if isValidId(articleId)
+        && isAdmin()
+        && isValidNewsArticle(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(articleId)
+        && isAdmin()
+        && isValidNewsArticle(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'slug',
+          'category',
+          'summary',
+          'content',
+          'imageUrl',
+          'isFeatured',
+          'isPublished'
+        ]);
+      allow delete: if isValidId(articleId) && isAdmin();
+    }
+
+    match /schedules/{scheduleId} {
+      allow get: if isValidId(scheduleId) && (existing().isPublished == true || isAdmin());
+      allow list: if existing().isPublished == true || isAdmin();
+      allow create: if isValidId(scheduleId)
+        && isAdmin()
+        && isValidScheduleEvent(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(scheduleId)
+        && isAdmin()
+        && isValidScheduleEvent(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'division',
+          'eventDate',
+          'startTime',
+          'endTime',
+          'location',
+          'description',
+          'mentor',
+          'reminderSent',
+          'isPublished'
+        ]);
+      allow delete: if isValidId(scheduleId) && isAdmin();
+    }
+
+    match /works/{workId} {
+      allow get: if isValidId(workId) && (
+        existing().approvalStatus == 'approved'
+        || isAdmin()
+        || (isVerifiedUser() && existing().authorUid == request.auth.uid)
+      );
+      allow list: if existing().approvalStatus == 'approved'
+        || isAdmin()
+        || (isVerifiedUser() && existing().authorUid == request.auth.uid);
+      allow create: if isValidId(workId)
+        && isVerifiedUser()
+        && isValidStudentWork(incoming())
+        && incoming().authorUid == request.auth.uid
+        && incoming().likesCount == 0
+        && incoming().commentsCount == 0
+        && incoming().sharesCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().approvalStatus == 'pending');
+      allow update: if isValidId(workId)
+        && isVerifiedUser()
+        && isValidStudentWork(incoming())
+        && incoming().authorUid == existing().authorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'title',
+            'description',
+            'category',
+            'commentsDisabled',
+            'approvalStatus',
+            'reviewNote',
+            'likesCount',
+            'commentsCount',
+            'sharesCount',
+            'updatedAt'
+          ]))
+          || (
+            existing().approvalStatus == 'approved'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt'])
+            && (
+              (
+                incoming().likesCount == existing().likesCount + 1
+                && existsAfter(/databases/$(database)/documents/works/$(workId)/likes/$(request.auth.uid))
+              )
+              || (
+                existing().likesCount > 0
+                && incoming().likesCount == existing().likesCount - 1
+                && !existsAfter(/databases/$(database)/documents/works/$(workId)/likes/$(request.auth.uid))
+              )
+            )
+          )
+          || (
+            existing().approvalStatus == 'approved'
+            && existing().commentsDisabled == false
+            && incoming().diff(existing()).affectedKeys().hasOnly(['commentsCount', 'updatedAt'])
+            && incoming().commentsCount == existing().commentsCount + 1
+          )
+          || (
+            existing().approvalStatus == 'approved'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['sharesCount', 'updatedAt'])
+            && incoming().sharesCount == existing().sharesCount + 1
+          )
+        );
+      allow delete: if isValidId(workId) && (isAdmin() || (isVerifiedUser() && existing().authorUid == request.auth.uid));
+
+      match /comments/{commentId} {
+        allow get: if isValidId(workId)
+          && isValidId(commentId)
+          && (
+            (get(/databases/$(database)/documents/works/$(workId)).data.approvalStatus == 'approved' && existing().isHidden == false)
+            || isAdmin()
+          );
+        allow list: if existing().isHidden == false || isAdmin();
+        allow create: if isValidId(workId)
+          && isValidId(commentId)
+          && isVerifiedUser()
+          && isValidWorkComment(incoming())
+          && incoming().workId == workId
+          && incoming().authorUid == request.auth.uid
+          && incoming().isHidden == false
+          && incoming().createdAt == request.time
+          && get(/databases/$(database)/documents/works/$(workId)).data.approvalStatus == 'approved'
+          && get(/databases/$(database)/documents/works/$(workId)).data.commentsDisabled == false;
+        allow update: if isValidId(workId)
+          && isValidId(commentId)
+          && isAdmin()
+          && isValidWorkComment(incoming())
+          && incoming().workId == existing().workId
+          && incoming().authorUid == existing().authorUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['isHidden']);
+        allow delete: if isValidId(workId) && isValidId(commentId) && isAdmin();
+      }
+
+      match /likes/{likeId} {
+        allow get: if isValidId(workId) && isValidId(likeId) && isVerifiedUser() && likeId == request.auth.uid;
+        allow list: if isVerifiedUser() && existing().userUid == request.auth.uid;
+        allow create: if isValidId(workId)
+          && isValidId(likeId)
+          && isVerifiedUser()
+          && likeId == request.auth.uid
+          && isValidWorkLike(incoming())
+          && incoming().workId == workId
+          && incoming().userUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && getAfter(/databases/$(database)/documents/works/$(workId)).data.likesCount >= 1;
+        allow update: if false;
+        allow delete: if isValidId(workId)
+          && isValidId(likeId)
+          && isVerifiedUser()
+          && likeId == request.auth.uid
+          && existing().userUid == request.auth.uid;
+      }
+    }
+
+    match /attendance_records/{recordId} {
+      allow get: if isValidId(recordId) && (isAdmin() || (isVerifiedUser() && existing().studentUid == request.auth.uid));
+      allow list: if isAdmin() || (isVerifiedUser() && existing().studentUid == request.auth.uid);
+      allow create: if isValidId(recordId)
+        && isAdmin()
+        && isValidAttendanceRecord(incoming())
+        && exists(/databases/$(database)/documents/members_public/$(incoming().memberId))
+        && incoming().recordedByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(recordId)
+        && isAdmin()
+        && isValidAttendanceRecord(incoming())
+        && incoming().memberId == existing().memberId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['checkInTime', 'method', 'status', 'sessionTitle', 'recordedBy', 'recordedByUid']);
+      allow delete: if isValidId(recordId) && isAdmin();
+    }
+
+    match /lms_tasks/{taskId} {
+      allow get: if isValidId(taskId) && (isAdmin() || (isVerifiedUser() && existing().isPublished == true));
+      allow list: if isAdmin() || (isVerifiedUser() && existing().isPublished == true);
+      allow create: if isValidId(taskId)
+        && isAdmin()
+        && isValidLmsTask(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(taskId)
+        && isAdmin()
+        && isValidLmsTask(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'division', 'pointsReward', 'dueDate', 'isPublished']);
+      allow delete: if isValidId(taskId) && isAdmin();
+
+      match /stages/{stageId} {
+        allow get: if isValidId(taskId)
+          && isValidId(stageId)
+          && (isAdmin() || (isVerifiedUser() && get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true));
+        allow list: if isAdmin() || (isVerifiedUser() && get(/databases/$(database)/documents/lms_tasks/$(taskId)).data.isPublished == true);
+        allow create: if isValidId(taskId)
+          && isValidId(stageId)
+          && isAdmin()
+          && isValidLmsTaskStage(incoming())
+          && incoming().taskId == taskId
+          && existsAfter(/databases/$(database)/documents/lms_tasks/$(taskId))
+          && incoming().createdAt == request.time;
+        allow update: if isValidId(taskId)
+          && isValidId(stageId)
+          && isAdmin()
+          && isValidLmsTaskStage(incoming())
+          && incoming().taskId == existing().taskId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['stageOrder', 'stageType', 'title', 'content', 'attachmentUrl']);
+        allow delete: if isValidId(taskId) && isValidId(stageId) && isAdmin();
+      }
+    }
+
+    match /lms_task_progress/{progressId} {
+      allow get: if isValidId(progressId) && (isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid));
+      allow list: if isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid);
+      allow create: if isValidId(progressId)
+        && isVerifiedUser()
+        && isValidLmsTaskProgress(incoming())
+        && incoming().userUid == request.auth.uid
+        && exists(/databases/$(database)/documents/lms_tasks/$(incoming().taskId)/stages/$(incoming().stageId))
+        && incoming().completedAt == request.time;
+      allow update: if isValidId(progressId)
+        && isVerifiedUser()
+        && isValidLmsTaskProgress(incoming())
+        && incoming().userUid == existing().userUid
+        && incoming().userUid == request.auth.uid
+        && incoming().taskId == existing().taskId
+        && incoming().stageId == existing().stageId
+        && incoming().completedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['responseText', 'completedAt']);
+      allow delete: if isValidId(progressId) && isAdmin();
+    }
+
+    match /lms_task_submissions/{submissionId} {
+      allow get: if isValidId(submissionId) && (isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid));
+      allow list: if isAdmin() || (isVerifiedUser() && existing().userUid == request.auth.uid);
+      allow create: if isValidId(submissionId)
+        && isVerifiedUser()
+        && isValidLmsTaskSubmission(incoming())
+        && incoming().userUid == request.auth.uid
+        && exists(/databases/$(database)/documents/lms_tasks/$(incoming().taskId))
+        && incoming().status == 'submitted'
+        && incoming().pointsAwarded == 0
+        && (!('adminFeedback' in incoming()) || incoming().adminFeedback == '')
+        && (!('reviewedAt' in incoming()))
+        && incoming().submittedAt == request.time;
+      allow update: if isValidId(submissionId)
+        && isVerifiedUser()
+        && isValidLmsTaskSubmission(incoming())
+        && incoming().taskId == existing().taskId
+        && incoming().userUid == existing().userUid
+        && (
+          (
+            isAdmin()
+            && incoming().submittedAt == existing().submittedAt
+            && (!('reviewedAt' in incoming()) || incoming().reviewedAt == request.time)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'pointsAwarded', 'adminFeedback', 'reviewedAt'])
+          )
+          || (
+            existing().userUid == request.auth.uid
+            && existing().status != 'approved'
+            && incoming().status == 'submitted'
+            && incoming().pointsAwarded == 0
+            && incoming().submittedAt == request.time
+            && (!('adminFeedback' in incoming()) || incoming().adminFeedback == existing().adminFeedback)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['fileUrl', 'fileName', 'fileType', 'submissionNote', 'status', 'pointsAwarded', 'submittedAt'])
+          )
+        );
+      allow delete: if isValidId(submissionId) && isAdmin();
+    }
+
+    match /blocked_words/{wordId} {
+      allow get: if isValidId(wordId) && (isAdmin() || (isVerifiedUser() && existing().isActive == true));
+      allow list: if isAdmin() || (isVerifiedUser() && existing().isActive == true);
+      allow create: if isValidId(wordId)
+        && isAdmin()
+        && isValidBlockedWord(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(wordId)
+        && isAdmin()
+        && isValidBlockedWord(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['word', 'isActive']);
+      allow delete: if isValidId(wordId) && isAdmin();
+    }
+
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && (
+        isAdmin()
+        || (isVerifiedUser() && (existing().targetUid == request.auth.uid || existing().targetUid == 'ALL'))
+      );
+      allow list: if isAdmin()
+        || (isVerifiedUser() && (existing().targetUid == request.auth.uid || existing().targetUid == 'ALL'));
+      allow create: if isValidId(notifId)
+        && isVerifiedUser()
+        && isValidNotification(incoming())
+        && incoming().isRead == false
+        && incoming().createdAt == request.time
+        && (
+          isAdmin()
+          || incoming().type in ['like', 'comment', 'share', 'moderation', 'task']
+        );
+      allow update: if isValidId(notifId)
+        && isVerifiedUser()
+        && isValidNotification(incoming())
+        && incoming().targetUid == existing().targetUid
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (existing().targetUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isRead']))
+        );
+      allow delete: if isValidId(notifId) && isAdmin();
+    }
+  }
+}

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import {
   Heart,
   MessageSquare,
@@ -13,8 +13,20 @@ import {
   Film,
   AlertCircle,
 } from 'lucide-react';
-import type { StudentProfile, StudentWork } from '../types';
-import { apiFetch } from '../lib/api';
+import type { StudentProfile, StudentWork, WorkComment } from '../types';
+import { apiFetch, getStoredToken } from '../lib/api';
+import { auth } from '../lib/firebase';
+import {
+  addWorkCommentInFirestore,
+  createWorkInFirestore,
+  deleteWorkCommentInFirestore,
+  deleteWorkInFirestore,
+  fetchWorkLikedByUser,
+  shareWorkInFirestore,
+  subscribeWorkComments,
+  toggleWorkCommentsInFirestore,
+  toggleWorkLikeInFirestore,
+} from '../lib/firestoreSync';
 import { formatTimeAgo, getInitials, resolveMediaUrl } from '../lib/mediaAssets';
 
 interface GallerySectionProps {
@@ -52,6 +64,8 @@ export function GallerySection({
   const [category, setCategory] = useState('Fotografi');
   const [description, setDescription] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  const [mediaUrlInput, setMediaUrlInput] = useState('');
+  const [mediaTypeInput, setMediaTypeInput] = useState<'image' | 'video'>('image');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
 
@@ -59,6 +73,26 @@ export function GallerySection({
   const [commentText, setCommentText] = useState('');
   const [commentError, setCommentError] = useState<string | null>(null);
   const [submittingComment, setSubmittingComment] = useState(false);
+  const [cloudComments, setCloudComments] = useState<WorkComment[] | null>(null);
+
+  useEffect(() => {
+    const fId = selectedWork?.firestoreId;
+    if (!fId) {
+      setCloudComments(null);
+      return;
+    }
+    const unsub = subscribeWorkComments(fId, currentUser?.role === 'admin', (comments) => {
+      setCloudComments(comments);
+    });
+    if (auth.currentUser) {
+      fetchWorkLikedByUser(fId).then((liked) => {
+        if (liked && !selectedWork.liked_by_me) {
+          onWorkPatch(selectedWork.id, { liked_by_me: true });
+        }
+      });
+    }
+    return () => unsub();
+  }, [selectedWork?.firestoreId, selectedWork?.id, currentUser?.role]);
 
   const filteredWorks = filter === 'Semua' ? works : works.filter((w) => w.category === filter);
 
@@ -78,34 +112,111 @@ export function GallerySection({
       onRequireLogin();
       return;
     }
-    if (!file || !title.trim()) {
-      onToast('Judul dan file gambar/video wajib dilengkapi.', 'error');
+    const cleanUrl = mediaUrlInput.trim();
+    if ((!file && !cleanUrl) || !title.trim()) {
+      onToast('Judul dan file atau tautan URL media wajib dilengkapi.', 'error');
       return;
     }
 
     setUploading(true);
     try {
-      const formData = new FormData();
-      formData.append('title', title.trim());
-      formData.append('category', category);
-      formData.append('description', description.trim());
-      formData.append('media', file);
+      let resolvedMediaUrl = cleanUrl;
+      let resolvedMediaType: 'image' | 'video' = mediaTypeInput;
+      let createdWork: StudentWork | null = null;
+      let pendingApproval = currentUser.role !== 'admin';
 
-      const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!res.pendingApproval) {
-        onWorkCreated(res.work);
+      if (file && getStoredToken()) {
+        const formData = new FormData();
+        formData.append('title', title.trim());
+        formData.append('category', category);
+        formData.append('description', description.trim());
+        formData.append('media', file);
+
+        const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
+          method: 'POST',
+          body: formData,
+        });
+        createdWork = res.work;
+        resolvedMediaUrl = res.work.media_url;
+        resolvedMediaType = res.work.media_type;
+        pendingApproval = Boolean(res.pendingApproval);
+      } else if (file && !cleanUrl) {
+        if (auth.currentUser && !getStoredToken()) {
+          throw new Error(
+            'Untuk mengunggah file langsung dari perangkat, masuk juga dengan Akun Portal atau masukkan Tautan URL gambar/video.'
+          );
+        }
+        const formData = new FormData();
+        formData.append('title', title.trim());
+        formData.append('category', category);
+        formData.append('description', description.trim());
+        formData.append('media', file);
+        const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
+          method: 'POST',
+          body: formData,
+        });
+        createdWork = res.work;
+        resolvedMediaUrl = res.work.media_url;
+        resolvedMediaType = res.work.media_type;
+        pendingApproval = Boolean(res.pendingApproval);
+      }
+
+      if (auth.currentUser && resolvedMediaUrl) {
+        const fId = await createWorkInFirestore({
+          title: title.trim(),
+          description: description.trim(),
+          category,
+          mediaType: resolvedMediaType,
+          mediaUrl: resolvedMediaUrl,
+          authorName: currentUser.full_name,
+          authorUsername: currentUser.username,
+          authorKelas: currentUser.kelas,
+          authorDivision: currentUser.division,
+          authorAvatarColor: currentUser.avatar_color,
+          authorAvatarUrl: currentUser.avatar_url || '',
+          isAdminUploader: currentUser.role === 'admin',
+        });
+        if (!createdWork) {
+          createdWork = {
+            id: Date.now(),
+            firestoreId: fId,
+            authorUid: auth.currentUser.uid,
+            user_id: currentUser.id,
+            author_name: currentUser.full_name,
+            author_username: currentUser.username,
+            author_kelas: currentUser.kelas,
+            author_division: currentUser.division,
+            author_avatar_color: currentUser.avatar_color,
+            author_avatar_url: currentUser.avatar_url,
+            title: title.trim(),
+            description: description.trim(),
+            category,
+            media_type: resolvedMediaType,
+            media_url: resolvedMediaUrl,
+            shares_count: 0,
+            comments_disabled: 0,
+            approval_status: currentUser.role === 'admin' ? 'approved' : 'pending',
+            created_at: new Date().toISOString(),
+            likes_count: 0,
+            comments_count: 0,
+            liked_by_me: false,
+            comments: [],
+          };
+        }
+      }
+
+      if (!pendingApproval && createdWork) {
+        onWorkCreated(createdWork);
       }
       setShowUploadModal(false);
       setTitle('');
       setDescription('');
+      setMediaUrlInput('');
       handleFileChange(null);
       onToast(
-        res.pendingApproval
+        pendingApproval
           ? 'Karya berhasil dikirim! Menunggu peninjauan dan persetujuan Admin sebelum terposting di Beranda.'
-          : 'Karya berhasil diunggah ke Beranda dan Galeri MMC.',
+          : 'Karya berhasil diterbitkan dan tersinkronisasi di Beranda & Galeri.',
         'success'
       );
     } catch (err) {
@@ -121,10 +232,19 @@ export function GallerySection({
       return;
     }
     try {
-      const res = await apiFetch<{ liked: boolean; likes_count: number }>(`/api/works/${work.id}/like`, {
-        method: 'POST',
-      });
-      onWorkPatch(work.id, { liked_by_me: res.liked, likes_count: res.likes_count });
+      if (auth.currentUser && work.firestoreId) {
+        const liked = await toggleWorkLikeInFirestore(work.firestoreId, work.likes_count);
+        const nextCount = liked ? work.likes_count + 1 : Math.max(0, work.likes_count - 1);
+        onWorkPatch(work.id, { liked_by_me: liked, likes_count: nextCount });
+      }
+      if (getStoredToken()) {
+        const res = await apiFetch<{ liked: boolean; likes_count: number }>(`/api/works/${work.id}/like`, {
+          method: 'POST',
+        }).catch(() => null);
+        if (res && !work.firestoreId) {
+          onWorkPatch(work.id, { liked_by_me: res.liked, likes_count: res.likes_count });
+        }
+      }
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memproses suka.', 'error');
     }
@@ -142,10 +262,18 @@ export function GallerySection({
       } else if (navigator.clipboard) {
         await navigator.clipboard.writeText(shareUrl);
       }
-      const res = await apiFetch<{ shares_count: number }>(`/api/works/${work.id}/share`, {
-        method: 'POST',
-      });
-      onWorkPatch(work.id, { shares_count: res.shares_count });
+      if (auth.currentUser && work.firestoreId) {
+        await shareWorkInFirestore(work.firestoreId, work.shares_count);
+        onWorkPatch(work.id, { shares_count: work.shares_count + 1 });
+      }
+      if (getStoredToken()) {
+        const res = await apiFetch<{ shares_count: number }>(`/api/works/${work.id}/share`, {
+          method: 'POST',
+        }).catch(() => null);
+        if (res && !work.firestoreId) {
+          onWorkPatch(work.id, { shares_count: res.shares_count });
+        }
+      }
       onToast('Tautan karya disalin untuk dibagikan.', 'success');
     } catch {
       onToast('Tautan karya disalin.', 'info');
@@ -164,10 +292,26 @@ export function GallerySection({
     setSubmittingComment(true);
     setCommentError(null);
     try {
-      await apiFetch(`/api/works/${selectedWork.id}/comments`, {
-        method: 'POST',
-        body: JSON.stringify({ content: commentText.trim() }),
-      });
+      if (auth.currentUser && selectedWork.firestoreId) {
+        const createdComment = await addWorkCommentInFirestore({
+          workId: selectedWork.firestoreId,
+          currentCommentsCount: selectedWork.comments_count,
+          authorName: currentUser.full_name,
+          authorUsername: currentUser.username,
+          authorKelas: currentUser.kelas,
+          authorRole: currentUser.role,
+          content: commentText.trim(),
+        });
+        setCloudComments((prev) => (prev ? [...prev, createdComment] : [createdComment]));
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/works/${selectedWork.id}/comments`, {
+          method: 'POST',
+          body: JSON.stringify({ content: commentText.trim() }),
+        }).catch((err) => {
+          if (!selectedWork.firestoreId || !auth.currentUser) throw err;
+        });
+      }
       setCommentText('');
     } catch (err) {
       setCommentError(err instanceof Error ? err.message : 'Komentar tidak dapat dikirim.');
@@ -178,12 +322,18 @@ export function GallerySection({
 
   const handleToggleComments = async (work: StudentWork) => {
     try {
-      const res = await apiFetch<{ comments_disabled: number }>(`/api/works/${work.id}/comments-toggle`, {
-        method: 'PATCH',
-      });
-      onWorkPatch(work.id, { comments_disabled: res.comments_disabled });
+      const nextDisabled = work.comments_disabled ? 0 : 1;
+      if (auth.currentUser && work.firestoreId) {
+        await toggleWorkCommentsInFirestore(work.firestoreId, nextDisabled === 1);
+      }
+      if (getStoredToken()) {
+        await apiFetch<{ comments_disabled: number }>(`/api/works/${work.id}/comments-toggle`, {
+          method: 'PATCH',
+        }).catch(() => {});
+      }
+      onWorkPatch(work.id, { comments_disabled: nextDisabled });
       onToast(
-        res.comments_disabled ? 'Komentar dinonaktifkan untuk karya ini.' : 'Komentar diaktifkan kembali.',
+        nextDisabled ? 'Komentar dinonaktifkan untuk karya ini.' : 'Komentar diaktifkan kembali.',
         'info'
       );
     } catch (err) {
@@ -193,7 +343,12 @@ export function GallerySection({
 
   const handleDeleteWork = async (work: StudentWork) => {
     try {
-      await apiFetch(`/api/works/${work.id}`, { method: 'DELETE' });
+      if (auth.currentUser && work.firestoreId) {
+        await deleteWorkInFirestore(work.firestoreId);
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/works/${work.id}`, { method: 'DELETE' }).catch(() => {});
+      }
       onWorkDeleted(work.id);
       if (selectedWork?.id === work.id) onSelectWork(null);
       onToast('Konten karya telah dihapus.', 'info');
@@ -202,9 +357,19 @@ export function GallerySection({
     }
   };
 
-  const handleDeleteComment = async (commentId: number) => {
+  const handleDeleteComment = async (comment: WorkComment) => {
     try {
-      await apiFetch(`/api/comments/${commentId}`, { method: 'DELETE' });
+      if (auth.currentUser && selectedWork?.firestoreId && comment.firestoreId) {
+        await deleteWorkCommentInFirestore(
+          selectedWork.firestoreId,
+          comment.firestoreId,
+          selectedWork.comments_count
+        );
+      }
+      if (getStoredToken()) {
+        await apiFetch(`/api/comments/${comment.id}`, { method: 'DELETE' }).catch(() => {});
+      }
+      setCloudComments((prev) => (prev ? prev.filter((c) => c.id !== comment.id) : prev));
       onToast('Komentar telah dihapus oleh admin.', 'info');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menghapus komentar.', 'error');
@@ -380,7 +545,10 @@ export function GallerySection({
                   </button>
                 </div>
 
-                {(currentUser?.role === 'admin' || currentUser?.id === work.user_id) && (
+                {(currentUser?.role === 'admin' ||
+                  currentUser?.id === work.user_id ||
+                  currentUser?.username === work.author_username ||
+                  (auth.currentUser && work.authorUid === auth.currentUser.uid)) && (
                   <button
                     type="button"
                     onClick={() => handleDeleteWork(work)}
@@ -484,6 +652,28 @@ export function GallerySection({
                     )}
                   </div>
                 )}
+
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-12 gap-2">
+                  <div className="sm:col-span-8">
+                    <input
+                      type="url"
+                      value={mediaUrlInput}
+                      onChange={(e) => setMediaUrlInput(e.target.value)}
+                      placeholder="Atau tempel URL foto/video HTTPS (opsional)"
+                      className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                    />
+                  </div>
+                  <div className="sm:col-span-4">
+                    <select
+                      value={mediaTypeInput}
+                      onChange={(e) => setMediaTypeInput(e.target.value as 'image' | 'video')}
+                      className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                    >
+                      <option value="image">Foto / Gambar</option>
+                      <option value="video">Video</option>
+                    </select>
+                  </div>
+                </div>
               </div>
 
               {currentUser?.role !== 'admin' && (
@@ -639,43 +829,50 @@ export function GallerySection({
 
                 {/* Comment List */}
                 <div className="space-y-3 pt-2">
-                  <p className="text-xs font-semibold text-slate-700">
-                    Diskusi &amp; Apresiasi ({selectedWork.comments?.length || 0})
-                  </p>
-                  {(!selectedWork.comments || selectedWork.comments.length === 0) ? (
-                    <p className="text-xs text-slate-500">
-                      Belum ada komentar. Jadilah yang pertama memberikan tanggapan edukatif.
-                    </p>
-                  ) : (
-                    <div className="space-y-3">
-                      {selectedWork.comments.map((c) => (
-                        <div key={c.id} className="bg-slate-50 border border-slate-200/70 rounded-xl p-3 space-y-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-semibold text-slate-900">
-                              {c.author_name}{' '}
-                              <span className="font-normal text-slate-500">
-                                · {c.author_role === 'admin' ? 'Pembina' : `Kelas ${c.author_kelas}`}
-                              </span>
-                            </span>
-                            <div className="flex items-center gap-2">
-                              <span className="text-[11px] text-slate-400">{formatTimeAgo(c.created_at)}</span>
-                              {currentUser?.role === 'admin' && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteComment(c.id)}
-                                  title="Hapus komentar"
-                                  className="text-slate-400 hover:text-rose-600 p-1"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
+                  {(() => {
+                    const activeComments = cloudComments ?? selectedWork.comments ?? [];
+                    return (
+                      <>
+                        <p className="text-xs font-semibold text-slate-700">
+                          Diskusi &amp; Apresiasi ({activeComments.length})
+                        </p>
+                        {activeComments.length === 0 ? (
+                          <p className="text-xs text-slate-500">
+                            Belum ada komentar. Jadilah yang pertama memberikan tanggapan edukatif.
+                          </p>
+                        ) : (
+                          <div className="space-y-3">
+                            {activeComments.map((c) => (
+                              <div key={c.id} className="bg-slate-50 border border-slate-200/70 rounded-xl p-3 space-y-1">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-900">
+                                    {c.author_name}{' '}
+                                    <span className="font-normal text-slate-500">
+                                      · {c.author_role === 'admin' ? 'Pembina' : `Kelas ${c.author_kelas}`}
+                                    </span>
+                                  </span>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[11px] text-slate-400">{formatTimeAgo(c.created_at)}</span>
+                                    {currentUser?.role === 'admin' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteComment(c)}
+                                        title="Hapus komentar"
+                                        className="text-slate-400 hover:text-rose-600 p-1"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                                <p className="text-sm text-slate-700 leading-snug">{c.content}</p>
+                              </div>
+                            ))}
                           </div>
-                          <p className="text-sm text-slate-700 leading-snug">{c.content}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 

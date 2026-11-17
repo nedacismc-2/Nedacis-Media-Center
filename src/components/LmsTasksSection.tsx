@@ -12,7 +12,9 @@ import {
   UploadCloud,
 } from 'lucide-react';
 import type { LmsTask, LmsTaskStage, StudentProfile } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getStoredToken } from '../lib/api';
+import { auth } from '../lib/firebase';
+import { completeLmsStageInFirestore, submitLmsTaskInFirestore } from '../lib/firestoreSync';
 import { formatDateID, resolveMediaUrl } from '../lib/mediaAssets';
 
 interface LmsTasksSectionProps {
@@ -107,11 +109,42 @@ export function LmsTasksSection({
     setCompletingStageId(stage.id);
     try {
       const responseText = practiceNotes[stage.id] || '';
-      const res = await apiFetch<{ task: LmsTask }>(`/api/tasks/${task.id}/stages/${stage.id}/complete`, {
-        method: 'POST',
-        body: JSON.stringify({ responseText }),
-      });
-      onTaskUpdated(res.task);
+      let updatedTask: LmsTask | null = null;
+
+      if (auth.currentUser && task.firestoreId && stage.firestoreId) {
+        await completeLmsStageInFirestore({
+          taskId: task.firestoreId,
+          stageId: stage.firestoreId,
+          responseText,
+          memberId: currentUser.firestoreId,
+        });
+        const nextProgress = [
+          ...task.progress.filter((p) => p.stage_id !== stage.id),
+          {
+            stage_id: stage.id,
+            stageFirestoreId: stage.firestoreId,
+            response_text: responseText,
+            completed_at: new Date().toISOString(),
+          },
+        ];
+        updatedTask = { ...task, progress: nextProgress };
+      }
+
+      if (getStoredToken()) {
+        try {
+          const res = await apiFetch<{ task: LmsTask }>(`/api/tasks/${task.id}/stages/${stage.id}/complete`, {
+            method: 'POST',
+            body: JSON.stringify({ responseText }),
+          });
+          if (!updatedTask) updatedTask = res.task;
+        } catch (err) {
+          if (!updatedTask) throw err;
+        }
+      }
+
+      if (updatedTask) {
+        onTaskUpdated(updatedTask);
+      }
       const nextIdx = task.stages.findIndex((s) => s.id === stage.id) + 1;
       if (nextIdx < task.stages.length) {
         setActiveStageIdx(nextIdx);
@@ -133,20 +166,81 @@ export function LmsTasksSection({
 
     setSubmittingTask(true);
     try {
-      const formData = new FormData();
-      if (uploadFile) {
-        formData.append('file', uploadFile);
-      }
-      formData.append('submissionNote', submissionNote.trim());
+      let updatedTask: LmsTask | null = null;
+      let nextTotalPoints: number | undefined;
+      let fileUrl = task.submission?.file_url || '';
+      let fileName = uploadFile?.name || task.submission?.file_name || 'tugas-siswa';
+      let fileType = uploadFile?.type || task.submission?.file_type || '';
 
-      const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
-        method: 'POST',
-        body: formData,
-      });
-      onTaskUpdated(res.task, res.totalPoints);
+      if (getStoredToken()) {
+        try {
+          const formData = new FormData();
+          if (uploadFile) {
+            formData.append('file', uploadFile);
+          }
+          formData.append('submissionNote', submissionNote.trim());
+
+          const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
+            method: 'POST',
+            body: formData,
+          });
+          updatedTask = res.task;
+          nextTotalPoints = res.totalPoints;
+          if (res.task.submission?.file_url) {
+            fileUrl = res.task.submission.file_url;
+            fileName = res.task.submission.file_name || fileName;
+          }
+        } catch (err) {
+          if (!auth.currentUser || !task.firestoreId) throw err;
+        }
+      }
+
+      if (auth.currentUser && task.firestoreId) {
+        const finalFileUrl =
+          fileUrl || `https://mmc-smpn2ciamis.local/submission/${encodeURIComponent(fileName)}`;
+        const subId = await submitLmsTaskInFirestore({
+          taskId: task.firestoreId,
+          fileUrl: finalFileUrl,
+          fileName,
+          fileType,
+          submissionNote: submissionNote.trim(),
+          memberId: currentUser.firestoreId,
+          fullName: currentUser.full_name,
+          username: currentUser.username,
+          kelas: currentUser.kelas,
+          division: currentUser.division,
+        });
+        if (!updatedTask) {
+          updatedTask = {
+            ...task,
+            submission: {
+              id: Date.now(),
+              firestoreId: subId,
+              userUid: auth.currentUser.uid,
+              task_id: task.id,
+              user_id: currentUser.id,
+              file_url: finalFileUrl,
+              file_name: fileName,
+              file_type: fileType,
+              submission_note: submissionNote.trim(),
+              status: 'submitted',
+              points_awarded: 0,
+              admin_feedback: '',
+              submitted_at: new Date().toISOString(),
+              reviewed_at: '',
+            },
+          };
+        }
+      }
+
+      if (updatedTask) {
+        onTaskUpdated(updatedTask, nextTotalPoints);
+      }
       handleSelectUploadFile(null);
       onToast(
-        `Tugas "${task.title}" berhasil diunggah! Anda memperoleh +${task.points_reward} Poin.`,
+        nextTotalPoints !== undefined
+          ? `Tugas "${task.title}" berhasil diunggah! Anda memperoleh +${task.points_reward} Poin.`
+          : `Tugas "${task.title}" terkirim ke Cloud Firestore dan menunggu verifikasi poin Pembina.`,
         'success'
       );
     } catch (err) {

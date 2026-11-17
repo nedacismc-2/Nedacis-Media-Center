@@ -9,6 +9,7 @@ export type Division =
 
 export interface StudentProfile {
   id: number;
+  firestoreId?: string;
   username: string;
   role: UserRole;
   full_name: string;
@@ -29,6 +30,7 @@ export interface StudentProfile {
 
 export interface NewsArticle {
   id: number;
+  firestoreId?: string;
   title: string;
   slug: string;
   category: string;
@@ -42,6 +44,7 @@ export interface NewsArticle {
 
 export interface ScheduleItem {
   id: number;
+  firestoreId?: string;
   title: string;
   division: string;
   event_date: string;
@@ -55,6 +58,7 @@ export interface ScheduleItem {
 
 export interface WorkComment {
   id: number;
+  firestoreId?: string;
   work_id: number;
   user_id: number;
   author_name: string;
@@ -69,6 +73,8 @@ export interface WorkComment {
 
 export interface StudentWork {
   id: number;
+  firestoreId?: string;
+  authorUid?: string;
   user_id: number;
   author_name: string;
   author_username: string;
@@ -94,6 +100,7 @@ export interface StudentWork {
 
 export interface AttendanceRecord {
   id: number;
+  firestoreId?: string;
   user_id: number;
   full_name: string;
   username: string;
@@ -112,6 +119,7 @@ export interface AttendanceRecord {
 
 export interface NotificationItem {
   id: number;
+  firestoreId?: string;
   user_id: number | null;
   type: 'attendance' | 'schedule' | 'like' | 'comment' | 'share' | 'moderation' | 'task';
   title: string;
@@ -162,6 +170,7 @@ export type LmsStageType = 'reading' | 'practice' | 'upload';
 
 export interface LmsTaskStage {
   id: number;
+  firestoreId?: string;
   task_id: number;
   stage_order: number;
   stage_type: LmsStageType;
@@ -173,12 +182,15 @@ export interface LmsTaskStage {
 
 export interface LmsTaskProgress {
   stage_id: number;
+  stageFirestoreId?: string;
   response_text: string;
   completed_at: string;
 }
 
 export interface LmsTaskSubmission {
   id: number;
+  firestoreId?: string;
+  userUid?: string;
   task_id: number;
   user_id: number;
   file_url: string;
@@ -194,6 +206,7 @@ export interface LmsTaskSubmission {
 
 export interface LmsTask {
   id: number;
+  firestoreId?: string;
   title: string;
   description: string;
   division: string;

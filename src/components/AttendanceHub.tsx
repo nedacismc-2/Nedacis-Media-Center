@@ -17,7 +17,9 @@ import {
   Wifi,
 } from 'lucide-react';
 import type { AttendanceRecord, MonthlyReportRow, StudentProfile } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, getStoredToken } from '../lib/api';
+import { auth } from '../lib/firebase';
+import { recordAttendanceInFirestore, sanitizeDocId } from '../lib/firestoreSync';
 import { formatDateID, formatLocalClock, getLocalTimeZoneLabel } from '../lib/mediaAssets';
 
 interface AttendanceHubProps {
@@ -92,29 +94,99 @@ export function AttendanceHub({
   ) => {
     const clean = code.trim();
     if (!clean) return;
+    const finalStatus = statusOverride || scanStatusMode;
     try {
-      const res = await apiFetch<{
-        record: AttendanceRecord;
-        student: { username: string; full_name: string; kelas: string };
-      }>('/api/attendance/scan', {
-        method: 'POST',
-        body: JSON.stringify({
-          code: clean,
+      const normalizedUpper = clean.toUpperCase();
+      const normalizedLower = clean.toLowerCase();
+      const matched = members.find(
+        (m) =>
+          (m.nfc_uid && m.nfc_uid.toUpperCase() === normalizedUpper) ||
+          (m.qr_code_token && m.qr_code_token.toUpperCase() === normalizedUpper) ||
+          m.username.toLowerCase() === normalizedLower ||
+          clean.includes(`profil/${m.username}`)
+      );
+
+      let recordedRecord: AttendanceRecord | null = null;
+      let studentName = matched?.full_name || '';
+      let studentKelas = matched?.kelas || '';
+
+      if (auth.currentUser && matched) {
+        const nowDate = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const attendanceDate = `${nowDate.getFullYear()}-${pad(nowDate.getMonth() + 1)}-${pad(nowDate.getDate())}`;
+        const checkInTime = `${pad(nowDate.getHours())}:${pad(nowDate.getMinutes())}:${pad(nowDate.getSeconds())}`;
+        const memberDocId = matched.firestoreId || sanitizeDocId(`member_${matched.username}`);
+
+        await recordAttendanceInFirestore({
+          memberId: memberDocId,
+          fullName: matched.full_name,
+          username: matched.username,
+          kelas: matched.kelas,
+          division: matched.division,
+          attendanceDate,
+          checkInTime,
           method,
+          status: finalStatus,
+          sessionTitle,
+          recordedBy: currentUser?.full_name || 'Pembina MMC',
+        });
+
+        recordedRecord = {
+          id: Date.now(),
+          firestoreId: sanitizeDocId(`att_${memberDocId}_${attendanceDate}`),
+          user_id: matched.id,
+          full_name: matched.full_name,
+          username: matched.username,
+          nis: matched.nis,
+          kelas: matched.kelas,
+          division: matched.division,
+          nfc_uid: matched.nfc_uid,
+          attendance_date: attendanceDate,
+          check_in_time: checkInTime,
+          method,
+          status: finalStatus,
           session_title: sessionTitle,
-          status: statusOverride || scanStatusMode,
-        }),
-      });
-      onAttendanceRecorded(res.record);
+          recorded_by: currentUser?.full_name || 'Pembina MMC',
+          created_at: nowDate.toISOString(),
+        };
+      }
+
+      if (getStoredToken()) {
+        try {
+          const res = await apiFetch<{
+            record: AttendanceRecord;
+            student: { username: string; full_name: string; kelas: string };
+          }>('/api/attendance/scan', {
+            method: 'POST',
+            body: JSON.stringify({
+              code: clean,
+              method,
+              session_title: sessionTitle,
+              status: finalStatus,
+            }),
+          });
+          if (!recordedRecord) recordedRecord = res.record;
+          studentName = res.student.full_name;
+          studentKelas = res.student.kelas;
+        } catch (apiErr) {
+          if (!recordedRecord) throw apiErr;
+        }
+      }
+
+      if (!recordedRecord) {
+        throw new Error('Kartu / QR tidak dikenali dalam daftar anggota.');
+      }
+
+      onAttendanceRecorded(recordedRecord);
       setLastScannedBanner({
-        name: res.student.full_name,
-        kelas: res.student.kelas,
+        name: studentName || recordedRecord.full_name,
+        kelas: studentKelas || recordedRecord.kelas,
         method,
-        status: res.record.status,
-        time: res.record.check_in_time,
+        status: recordedRecord.status,
+        time: recordedRecord.check_in_time,
       });
       onToast(
-        `${res.student.full_name} (${res.student.kelas}) tercatat ${res.record.status} via ${method}.`,
+        `${recordedRecord.full_name} (${recordedRecord.kelas}) tercatat ${recordedRecord.status} via ${method}.`,
         'success'
       );
     } catch (err) {
@@ -337,28 +409,71 @@ export function AttendanceHub({
     img.src = objectUrl;
   };
 
-  // Monthly Report Fetch
+  // Monthly Report Fetch / Cloud Calculation
   useEffect(() => {
     if (subTab !== 'report') return;
     let active = true;
-    setLoadingReport(true);
-    apiFetch<{ month: string; totalSessions: number; rows: MonthlyReportRow[] }>(
-      `/api/attendance/monthly-report?month=${encodeURIComponent(reportMonth)}`
-    )
-      .then((res) => {
-        if (active) {
-          setReportRows(res.rows);
-          setReportTotalSessions(res.totalSessions);
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (active) setLoadingReport(false);
+
+    const buildClientReport = () => {
+      const monthRecs = attendanceRecords.filter((r) => r.attendance_date.startsWith(reportMonth));
+      const uniqueDates = new Set(monthRecs.map((r) => r.attendance_date));
+      const totalSessions = Math.max(uniqueDates.size, 1);
+      const students = members.filter((m) => m.role === 'student');
+      const rows: MonthlyReportRow[] = students.map((st) => {
+        const recs = monthRecs.filter(
+          (r) => r.username === st.username || r.user_id === st.id
+        );
+        const hadir = recs.filter((r) => r.status === 'Hadir').length;
+        const terlambat = recs.filter((r) => r.status === 'Terlambat').length;
+        const izin = recs.filter((r) => r.status === 'Izin').length;
+        const attended = hadir + terlambat + izin;
+        const alpha = Math.max(0, totalSessions - attended);
+        const rate = Math.min(100, Math.round(((hadir + terlambat) / totalSessions) * 100));
+        return {
+          user_id: st.id,
+          full_name: st.full_name,
+          username: st.username,
+          nis: st.nis,
+          kelas: st.kelas,
+          division: st.division,
+          total_sessions: totalSessions,
+          hadir_count: hadir,
+          terlambat_count: terlambat,
+          izin_count: izin,
+          alpha_count: alpha,
+          attendance_rate: rate,
+          last_method: recs[0]?.method || null,
+        };
       });
+      if (active) {
+        setReportRows(rows);
+        setReportTotalSessions(uniqueDates.size);
+        setLoadingReport(false);
+      }
+    };
+
+    if (getStoredToken() && !auth.currentUser) {
+      setLoadingReport(true);
+      apiFetch<{ month: string; totalSessions: number; rows: MonthlyReportRow[] }>(
+        `/api/attendance/monthly-report?month=${encodeURIComponent(reportMonth)}`
+      )
+        .then((res) => {
+          if (active) {
+            setReportRows(res.rows);
+            setReportTotalSessions(res.totalSessions);
+          }
+        })
+        .catch(() => buildClientReport())
+        .finally(() => {
+          if (active) setLoadingReport(false);
+        });
+    } else {
+      buildClientReport();
+    }
     return () => {
       active = false;
     };
-  }, [subTab, reportMonth, attendanceRecords.length]);
+  }, [subTab, reportMonth, attendanceRecords, members]);
 
   const handleDownloadCsv = () => {
     const headers = ['NIS', 'Nama Lengkap', 'Kelas', 'Divisi', 'Total Sesi', 'Hadir', 'Terlambat', 'Izin', 'Alpha', 'Persentase (%)', 'Metode Terakhir'];
