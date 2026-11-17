@@ -113,7 +113,7 @@ export function HomeSection({
                 onClick={() => onNavigate('anggota')}
                 className="inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-amber-950 bg-[#FACC15] hover:bg-[#EAB308] rounded-xl transition-colors min-h-[44px] whitespace-nowrap shrink-0"
               >
-                Profil Anggota MMC
+                Profil Anggota NMC
               </button>
             )}
           </div>
@@ -122,13 +122,13 @@ export function HomeSection({
         <div className="lg:col-span-6 relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 min-h-[280px] lg:min-h-[420px]">
           <img
             src={siteBranding.heroImageUrl ? resolveMediaUrl(siteBranding.heroImageUrl) : HERO_IMAGE}
-            alt={siteBranding.heroTitle || 'Anggota Multimedia Media Center SMPN 2 Ciamis di ruang produksi studio'}
+            alt={siteBranding.heroTitle || 'Anggota Nedacis Media Center SMPN 2 Ciamis di ruang produksi studio'}
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover"
           />
           <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent p-6 sm:p-8">
             <p className="text-xs font-medium text-slate-200">
-              Studio Produksi MMC · Kampus SMPN 2 Ciamis
+              Studio Produksi NMC · Kampus SMPN 2 Ciamis
             </p>
             <p className="mt-1 text-base sm:text-lg font-medium text-white">
               Dokumentasi kegiatan sekolah, produksi siaran podcast, dan pelatihan media kreatif siswa.
@@ -174,7 +174,7 @@ export function HomeSection({
             </h2>
           </div>
           <p className="text-sm text-slate-500">
-            Disusun langsung oleh tim redaksi &amp; peliput lapangan MMC SMPN 2 Ciamis
+            Disusun langsung oleh tim redaksi &amp; peliput lapangan NMC SMPN 2 Ciamis
           </p>
         </div>
 

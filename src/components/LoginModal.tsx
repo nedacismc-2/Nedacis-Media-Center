@@ -102,7 +102,7 @@ export function LoginModal({
       >
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">Masuk Akun MMC</h2>
+            <h2 className="text-lg font-semibold text-slate-900">Masuk Akun NMC</h2>
             <p className="text-xs text-slate-500">SMPN 2 Ciamis · Portal Resmi Anggota &amp; Pembina</p>
           </div>
           <button
@@ -192,7 +192,7 @@ export function LoginModal({
                   required
                   value={loginId}
                   onChange={(e) => setLoginId(e.target.value)}
-                  placeholder="Masukkan ID anggota (mis. MMC-CMS-001)"
+                  placeholder="Masukkan ID anggota (mis. NMC-CMS-001)"
                   className="w-full pl-10 pr-10 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
                 />
                 <button

@@ -256,7 +256,7 @@ export function GallerySection({
       if (navigator.share) {
         await navigator.share({
           title: work.title,
-          text: `Lihat karya ${work.author_name} di Multimedia Media Center SMPN 2 Ciamis`,
+          text: `Lihat karya ${work.author_name} di Nedacis Media Center SMPN 2 Ciamis`,
           url: shareUrl,
         }).catch(() => {});
       } else if (navigator.clipboard) {
@@ -388,7 +388,7 @@ export function GallerySection({
             Hasil Karya Fotografi &amp; Video Siswa
           </h1>
           <p className="mt-1.5 text-sm text-slate-600">
-            Ruang publikasi dan diskusi edukatif untuk karya dokumentasi peserta ekstrakurikuler MMC SMPN 2 Ciamis.
+            Ruang publikasi dan diskusi edukatif untuk karya dokumentasi peserta ekstrakurikuler NMC SMPN 2 Ciamis.
           </p>
         </div>
 
@@ -881,7 +881,7 @@ export function GallerySection({
                 {selectedWork.comments_disabled === 1 ? (
                   <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 flex items-center gap-2">
                     <Lock className="w-4 h-4 shrink-0" />
-                    Kolom komentar dinonaktifkan sementara oleh Pembina MMC.
+                    Kolom komentar dinonaktifkan sementara oleh Pembina NMC.
                   </p>
                 ) : (
                   <form onSubmit={handleCommentSubmit} className="space-y-2">

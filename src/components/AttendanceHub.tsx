@@ -44,7 +44,7 @@ export function AttendanceHub({
   onToast,
 }: AttendanceHubProps) {
   const [subTab, setSubTab] = useState<HubTab>('nfc');
-  const [sessionTitle, setSessionTitle] = useState('Pertemuan Rutin Multimedia Media Center');
+  const [sessionTitle, setSessionTitle] = useState('Pertemuan Rutin Nedacis Media Center');
   const [scanStatusMode, setScanStatusMode] = useState<'Hadir' | 'Terlambat' | 'Izin'>('Hadir');
 
   // NFC/RFID USB Reader state
@@ -128,7 +128,7 @@ export function AttendanceHub({
           method,
           status: finalStatus,
           sessionTitle,
-          recordedBy: currentUser?.full_name || 'Pembina MMC',
+          recordedBy: currentUser?.full_name || 'Pembina NMC',
         });
 
         recordedRecord = {
@@ -146,7 +146,7 @@ export function AttendanceHub({
           method,
           status: finalStatus,
           session_title: sessionTitle,
-          recorded_by: currentUser?.full_name || 'Pembina MMC',
+          recorded_by: currentUser?.full_name || 'Pembina NMC',
           created_at: nowDate.toISOString(),
         };
       }
@@ -499,7 +499,7 @@ export function AttendanceHub({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Laporan-Kehadiran-MMC-SMPN2Ciamis-${reportMonth}.csv`;
+    link.download = `Laporan-Kehadiran-NMC-SMPN2Ciamis-${reportMonth}.csv`;
     link.click();
     URL.revokeObjectURL(url);
     onToast('Laporan kehadiran bulanan CSV berhasil diunduh.', 'success');
@@ -874,7 +874,7 @@ export function AttendanceHub({
                 type="text"
                 value={qrManualInput}
                 onChange={(e) => setQrManualInput(e.target.value)}
-                placeholder="Atau masukkan token QR siswa (mis. MMC-CMS-001)"
+                placeholder="Atau masukkan token QR siswa (mis. NMC-CMS-001)"
                 className="flex-1 px-4 py-2.5 text-sm font-mono bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:bg-white focus:border-[#1D4ED8]"
               />
               <button
@@ -917,7 +917,7 @@ export function AttendanceHub({
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-5">
             <div>
               <p className="text-xs font-semibold uppercase tracking-widest text-[#1D4ED8] print-only">
-                SMP Negeri 2 Ciamis · Multimedia Media Center
+                SMP Negeri 2 Ciamis · Nedacis Media Center
               </p>
               <h2 className="text-xl font-semibold text-slate-900">
                 Laporan Kehadiran Bulanan Pembina

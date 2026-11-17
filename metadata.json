@@ -1,6 +1,6 @@
 {
-  "name": "MMC SMPN 2 Ciamis",
-  "description": "Portal Resmi Ekstrakurikuler Multimedia Media Center (MMC) SMPN 2 Ciamis — Liputan Sekolah, Galeri Karya Siswa, Absensi NFC/RFID & QR Real-Time.",
+  "name": "NMC SMPN 2 Ciamis",
+  "description": "Portal Resmi Ekstrakurikuler Nedacis Media Center (NMC) SMPN 2 Ciamis — Liputan Sekolah, Galeri Karya Siswa, Absensi NFC/RFID & QR Real-Time.",
   "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

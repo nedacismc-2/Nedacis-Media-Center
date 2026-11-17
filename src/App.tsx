@@ -482,7 +482,7 @@ export default function App() {
         division: isFirebaseAdmin ? 'Pembina' : 'Fotografi',
         bio: 'Akun terhubung ke Cloud Firestore.',
         nfc_uid: '',
-        qr_code_token: `MMC-FB-${firebaseUser.uid.slice(0, 8).toUpperCase()}`,
+        qr_code_token: `NMC-FB-${firebaseUser.uid.slice(0, 8).toUpperCase()}`,
         avatar_color: isFirebaseAdmin ? '#B91C1C' : '#1D4ED8',
         avatar_url: firebaseUser.photoURL || '',
         show_in_members: 0,
@@ -816,7 +816,7 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10">
         {loading ? (
           <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center text-sm text-slate-500">
-            Memuat portal Multimedia Media Center SMPN 2 Ciamis...
+            Memuat portal Nedacis Media Center SMPN 2 Ciamis...
           </div>
         ) : (
           <>
@@ -990,7 +990,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-blue-100">
           <div>
             <p className="font-semibold text-white">
-              Multimedia Media Center (MMC) · SMP Negeri 2 Ciamis
+              Nedacis Media Center (NMC) · SMP Negeri 2 Ciamis
             </p>
             <p className="mt-0.5 text-blue-200">
               {siteBranding.footerAddress || 'Jalan Jenderal Sudirman No. 241, Sindangrasa, Kec. Ciamis, Kabupaten Ciamis, Jawa Barat 46215'}

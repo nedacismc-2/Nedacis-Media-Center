@@ -197,7 +197,7 @@ export function LmsTasksSection({
 
       if (auth.currentUser && task.firestoreId) {
         const finalFileUrl =
-          fileUrl || `https://mmc-smpn2ciamis.local/submission/${encodeURIComponent(fileName)}`;
+          fileUrl || `https://nmc-smpn2ciamis.local/submission/${encodeURIComponent(fileName)}`;
         const subId = await submitLmsTaskInFirestore({
           taskId: task.firestoreId,
           fileUrl: finalFileUrl,
@@ -424,7 +424,7 @@ export function LmsTasksSection({
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
                   <span>
                     {selectedTask.division === 'Semua'
-                      ? 'Seluruh Anggota MMC'
+                      ? 'Seluruh Anggota NMC'
                       : `Divisi ${selectedTask.division}`}
                     {selectedTask.creator_name ? ` · Oleh ${selectedTask.creator_name}` : ''}
                   </span>

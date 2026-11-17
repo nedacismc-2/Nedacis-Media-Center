@@ -367,6 +367,7 @@ export function initDatabase() {
 
     ensurePembinaMemberAccounts();
     ensureSampleLmsTasks();
+    ensureNmcRebrandMigration(nowInit);
   })();
 
   pruneExpiredSessions();
@@ -402,7 +403,7 @@ function ensureSampleLmsTasks() {
     const t1 = Number(
       insertTask.run(
         'Dasar Komposisi Visual & Etika Liputan Sekolah',
-        'Modul pengantar wajib bagi anggota Multimedia Media Center sebelum turun meliput kegiatan resmi SMPN 2 Ciamis.',
+        'Modul pengantar wajib bagi anggota Nedacis Media Center sebelum turun meliput kegiatan resmi SMPN 2 Ciamis.',
         'Semua',
         100,
         '2026-11-28',
@@ -425,7 +426,7 @@ function ensureSampleLmsTasks() {
       2,
       'reading',
       'Membaca Materi: Etika Dokumentasi & Jurnalistik Pelajar',
-      'Setiap anggota MMC membawa nama baik SMP Negeri 2 Ciamis saat bertugas:\n\n1. Selalu meminta izin dengan sopan sebelum merekam wawancara guru, tamu sekolah, maupun peserta didik lain.\n2. Hindari mengambil atau mempublikasikan foto yang merendahkan martabat subjek.\n3. Catat nama lengkap, kelas/jabatan narasumber, serta waktu kegiatan dengan tepat agar keterangan foto (caption) akurat.',
+      'Setiap anggota NMC membawa nama baik SMP Negeri 2 Ciamis saat bertugas:\n\n1. Selalu meminta izin dengan sopan sebelum merekam wawancara guru, tamu sekolah, maupun peserta didik lain.\n2. Hindari mengambil atau mempublikasikan foto yang merendahkan martabat subjek.\n3. Catat nama lengkap, kelas/jabatan narasumber, serta waktu kegiatan dengan tepat agar keterangan foto (caption) akurat.',
       '',
       now
     );
@@ -500,9 +501,9 @@ function ensurePembinaMemberAccounts() {
       nis: 'NIP-19780514',
       kelas: 'Pembina',
       division: 'Videografi',
-      bio: 'Pembina Ekstrakurikuler Multimedia Media Center (MMC) bidang produksi video, sinematografi, dan fotografi dokumentasi sekolah.',
+      bio: 'Pembina Ekstrakurikuler Nedacis Media Center (NMC) bidang produksi video, sinematografi, dan fotografi dokumentasi sekolah.',
       nfc_uid: '04PEMBINA01',
-      qr_code_token: 'MMC-PEMBINA-01',
+      qr_code_token: 'NMC-PEMBINA-01',
       avatar_color: '#B91C1C',
     },
     {
@@ -511,9 +512,9 @@ function ensurePembinaMemberAccounts() {
       nis: 'NIP-19860922',
       kelas: 'Pembina',
       division: 'Jurnalistik',
-      bio: 'Pembina Ekstrakurikuler Multimedia Media Center (MMC) bidang jurnalistik pelajar, desain grafis, dan penyiaran radio sekolah.',
+      bio: 'Pembina Ekstrakurikuler Nedacis Media Center (NMC) bidang jurnalistik pelajar, desain grafis, dan penyiaran radio sekolah.',
       nfc_uid: '04PEMBINA02',
-      qr_code_token: 'MMC-PEMBINA-02',
+      qr_code_token: 'NMC-PEMBINA-02',
       avatar_color: '#1D4ED8',
     },
   ];
@@ -567,20 +568,20 @@ function seedInitialData() {
     'NIP-19890412',
     'Pembina',
     'Penyiaran',
-    'Pembina Ekstrakurikuler Multimedia Media Center (MMC) SMPN 2 Ciamis sekaligus koordinator dokumentasi dan jurnalistik sekolah.',
+    'Pembina Ekstrakurikuler Nedacis Media Center (NMC) SMPN 2 Ciamis sekaligus koordinator dokumentasi dan jurnalistik sekolah.',
     '04ADMIN000',
-    'MMC-PEMBINA-000',
+    'NMC-PEMBINA-000',
     '#0F172A',
     now
   );
 
   // 20 Registered Students
   const studentsSeed = [
-    ['ahmad.fauzan', 'Ahmad Fauzan Pratama', '242507001', '9A', 'Videografi', 'Ketua MMC periode 2026/2027. Fokus pada sinematografi dokumenter kegiatan sekolah.', '#1D4ED8'],
+    ['ahmad.fauzan', 'Ahmad Fauzan Pratama', '242507001', '9A', 'Videografi', 'Ketua NMC periode 2026/2027. Fokus pada sinematografi dokumenter kegiatan sekolah.', '#1D4ED8'],
     ['siti.nurhaliza', 'Siti Nurhaliza Putri', '242507002', '9B', 'Fotografi', 'Fotografer utama liputan upacara, P5, dan dokumentasi prestasi siswa SMPN 2 Ciamis.', '#0F766E'],
     ['rizky.ramadhan', 'Rizky Ramadhan', '242507003', '9A', 'Jurnalistik', 'Pemimpin redaksi buletin digital sekolah dan penulis artikel berita mingguan.', '#B45309'],
-    ['alya.azzahra', 'Alya Azzahra Dewi', '242507004', '9C', 'Desain Grafis', 'Desainer poster acara sekolah, majalah dinding digital, dan identitas visual MMC.', '#BE123C'],
-    ['dimas.saputra', 'Dimas Aditya Saputra', '242507005', '8A', 'Penyiaran', 'Penyiar podcast suara siswa dan operator audio studio MMC SMPN 2 Ciamis.', '#4338CA'],
+    ['alya.azzahra', 'Alya Azzahra Dewi', '242507004', '9C', 'Desain Grafis', 'Desainer poster acara sekolah, majalah dinding digital, dan identitas visual NMC.', '#BE123C'],
+    ['dimas.saputra', 'Dimas Aditya Saputra', '242507005', '8A', 'Penyiaran', 'Penyiar podcast suara siswa dan operator audio studio NMC SMPN 2 Ciamis.', '#4338CA'],
     ['nadia.khairunnisa', 'Nadia Khairunnisa', '242507006', '8B', 'Fotografi', 'Menyukai fotografi arsitektur sekolah dan potret candid kegiatan ekstrakurikuler.', '#0369A1'],
     ['fajar.nugraha', 'Fajar Nugraha', '242507007', '8C', 'Videografi', 'Editor video rekap acara sekolah dan motion graphic pengumuman resmi.', '#047857'],
     ['putri.ramadhani', 'Putri Rahma Ramadhani', '242507008', '8A', 'Jurnalistik', 'Reporter lapangan untuk liputan lomba OSN, O2SN, dan FLS2N tingkat kabupaten.', '#7C2D12'],
@@ -602,7 +603,7 @@ function seedInitialData() {
   studentsSeed.forEach((s, idx) => {
     const num = String(idx + 1).padStart(2, '0');
     const nfcUid = `04E2A100${num}`;
-    const qrToken = `MMC-CMS-0${num}`;
+    const qrToken = `NMC-CMS-0${num}`;
     const info = insertUser.run(
       s[0],
       studentHash,
@@ -627,11 +628,11 @@ function seedInitialData() {
   `);
 
   insertArticle.run(
-    'Tim Liputan MMC Dokumentasikan Gebyar Pentas Seni & Budaya Sunda SMPN 2 Ciamis',
+    'Tim Liputan NMC Dokumentasikan Gebyar Pentas Seni & Budaya Sunda SMPN 2 Ciamis',
     'gebyar-pentas-seni-budaya-sunda-2026',
     'Liputan Sekolah',
-    'Sebanyak 12 anggota aktif MMC turun langsung meliput jalannya Gebyar Pentas Seni dan Budaya Jawa Barat di lapangan utama sekolah dengan format multi-kamera.',
-    `Lapangan utama SMPN 2 Ciamis dipadati ratusan siswa, guru, dan orang tua pada gelaran Gebyar Pentas Seni & Budaya Sunda tahun ajaran 2026/2027. Tim Multimedia Media Center (MMC) menurunkan personel gabungan dari divisi Fotografi, Videografi, dan Jurnalistik untuk memastikan setiap momen penting terdokumentasi secara profesional.\n\nDengan pembagian tiga titik kamera—panggung utama, area belakang panggung, dan sudut penonton—para siswa belajar menerapkan teknik pencahayaan alami pagi hari serta wawancara langsung bersama para penampil tari tradisional dan angklung.\n\nSeluruh hasil dokumentasi diolah di ruang studio MMC menggunakan alur penyuntingan kolaboratif sebelum dipublikasikan pada arsip berita resmi sekolah dan kanal informasi orang tua.`,
+    'Sebanyak 12 anggota aktif NMC turun langsung meliput jalannya Gebyar Pentas Seni dan Budaya Jawa Barat di lapangan utama sekolah dengan format multi-kamera.',
+    `Lapangan utama SMPN 2 Ciamis dipadati ratusan siswa, guru, dan orang tua pada gelaran Gebyar Pentas Seni & Budaya Sunda tahun ajaran 2026/2027. Tim Nedacis Media Center (NMC) menurunkan personel gabungan dari divisi Fotografi, Videografi, dan Jurnalistik untuk memastikan setiap momen penting terdokumentasi secara profesional.\n\nDengan pembagian tiga titik kamera—panggung utama, area belakang panggung, dan sudut penonton—para siswa belajar menerapkan teknik pencahayaan alami pagi hari serta wawancara langsung bersama para penampil tari tradisional dan angklung.\n\nSeluruh hasil dokumentasi diolah di ruang studio NMC menggunakan alur penyuntingan kolaboratif sebelum dipublikasikan pada arsip berita resmi sekolah dan kanal informasi orang tua.`,
     'asset:news_liputan',
     'Rizky Ramadhan (9A)',
     '2026-11-12',
@@ -642,8 +643,8 @@ function seedInitialData() {
     'Podcast Suara Nedacis Episode 14: Mengulas Literasi Digital & Etika Bermedia',
     'podcast-suara-nedacis-literasi-digital',
     'Siaran',
-    'Divisi Penyiaran MMC memproduksi episode terbaru Podcast Suara Nedacis bersama pembina OSIS membahas ruang diskusi sehat bagi pelajar.',
-    `Ruang akustik Multimedia Media Center kembali beroperasi penuh untuk perekaman Podcast Suara Nedacis Episode 14. Kali ini, Dimas Aditya Saputra (8A) dan Keisha Amelia Putri (9D) memandu diskusi interaktif mengenai etika berkomentar di ruang digital dan cara memverifikasi informasi berita sekolah.\n\nProduksi episode ini memanfaatkan dua mikrofon kondensor studio dan pengolah audio multi-jalur sehingga menghasilkan kualitas suara jernih tanpa kebisingan latar.`,
+    'Divisi Penyiaran NMC memproduksi episode terbaru Podcast Suara Nedacis bersama pembina OSIS membahas ruang diskusi sehat bagi pelajar.',
+    `Ruang akustik Nedacis Media Center kembali beroperasi penuh untuk perekaman Podcast Suara Nedacis Episode 14. Kali ini, Dimas Aditya Saputra (8A) dan Keisha Amelia Putri (9D) memandu diskusi interaktif mengenai etika berkomentar di ruang digital dan cara memverifikasi informasi berita sekolah.\n\nProduksi episode ini memanfaatkan dua mikrofon kondensor studio dan pengolah audio multi-jalur sehingga menghasilkan kualitas suara jernih tanpa kebisingan latar.`,
     'asset:news_podcast',
     'Keisha Amelia Putri (9D)',
     '2026-11-09',
@@ -654,8 +655,8 @@ function seedInitialData() {
     'Workshop Penyuntingan Video Dokumenter & Color Grading Dasar bagi Anggota Kelas 7',
     'workshop-penyuntingan-video-dokumenter',
     'Workshop',
-    'Anggota senior MMC membimbing siswa kelas 7 menyusun alur cerita dokumenter pendek mulai dari pemilahan klip hingga penyelarasan warna.',
-    `Sebagai bagian dari pembinaan kaderisasi, divisi Videografi menyelenggarakan sesi praktik langsung penyuntingan video dokumenter di laboratorium multimedia sekolah. Sebanyak tujuh anggota baru dari kelas 7 mempelajari struktur narasi tiga babak, pemilihan musik latar bebas lisensi, serta teknik color grading dasar agar rekaman lapangan terlihat seragam.\n\nHasil karya latihan peserta langsung diunggah ke portal galeri MMC untuk mendapatkan umpan balik konstruktif dari sesama anggota dan pembina.`,
+    'Anggota senior NMC membimbing siswa kelas 7 menyusun alur cerita dokumenter pendek mulai dari pemilahan klip hingga penyelarasan warna.',
+    `Sebagai bagian dari pembinaan kaderisasi, divisi Videografi menyelenggarakan sesi praktik langsung penyuntingan video dokumenter di laboratorium multimedia sekolah. Sebanyak tujuh anggota baru dari kelas 7 mempelajari struktur narasi tiga babak, pemilihan musik latar bebas lisensi, serta teknik color grading dasar agar rekaman lapangan terlihat seragam.\n\nHasil karya latihan peserta langsung diunggah ke portal galeri NMC untuk mendapatkan umpan balik konstruktif dari sesama anggota dan pembina.`,
     'asset:work_editing',
     'Ahmad Fauzan Pratama (9A)',
     '2026-11-05',
@@ -663,11 +664,11 @@ function seedInitialData() {
   );
 
   insertArticle.run(
-    'Studio Produksi MMC Resmi Mengadopsi Sistem Absensi Kartu Pelajar NFC & QR Code',
+    'Studio Produksi NMC Resmi Mengadopsi Sistem Absensi Kartu Pelajar NFC & QR Code',
     'adopsi-sistem-absensi-nfc-dan-qr-code',
     'Prestasi',
     'Transformasi tata kelola ekstrakurikuler SMPN 2 Ciamis melalui integrasi USB reader NFC/RFID dan QR Code profil siswa secara real-time.',
-    `Mulai bulan November ini, setiap pertemuan rutin ekstrakurikuler MMC SMPN 2 Ciamis menggunakan pencatatan kehadiran terintegrasi berbasis kartu pelajar NFC/RFID dan pemindaian QR Code profil anggota.\n\nSiswa cukup menempelkan kartu pelajar pada USB reader di meja studio, dan catatan kehadiran langsung tampil transparan di profil masing-masing serta terekap otomatis dalam laporan bulanan pembina.`,
+    `Mulai bulan November ini, setiap pertemuan rutin ekstrakurikuler NMC SMPN 2 Ciamis menggunakan pencatatan kehadiran terintegrasi berbasis kartu pelajar NFC/RFID dan pemindaian QR Code profil anggota.\n\nSiswa cukup menempelkan kartu pelajar pada USB reader di meja studio, dan catatan kehadiran langsung tampil transparan di profil masing-masing serta terekap otomatis dalam laporan bulanan pembina.`,
     'asset:hero_studio',
     'Hendra Kusuma, S.Pd.',
     '2026-11-02',
@@ -686,7 +687,7 @@ function seedInitialData() {
     '2026-11-16',
     '15:00',
     '16:45',
-    'Lapangan Utama & Studio MMC',
+    'Lapangan Utama & Studio NMC',
     'Pelatihan komposisi rule of thirds, kecepatan rana untuk momen bergerak, serta kurasi foto berita.',
     'Hendra Kusuma, S.Pd.',
     1
@@ -708,7 +709,7 @@ function seedInitialData() {
     '2026-11-20',
     '14:30',
     '16:15',
-    'Ruang Akustik Siaran MMC',
+    'Ruang Akustik Siaran NMC',
     'Persiapan naskah wawancara guru berprestasi, uji mikrofon kondensor, dan mixing audio siaran.',
     'Keisha Amelia & Pembina',
     0
@@ -781,7 +782,7 @@ function seedInitialData() {
 
   const w5 = Number(insertWork.run(
     studentIds[6],
-    'Kolaborasi Tim Kamera Studio Produksi MMC',
+    'Kolaborasi Tim Kamera Studio Produksi NMC',
     'Pengujian fokus lensa dan pemantauan monitor lapangan oleh tim produksi utama sebelum siaran langsung upacara.',
     'Videografi',
     'image',
@@ -819,7 +820,7 @@ function seedInitialData() {
   `);
 
   const pastDates = [
-    { date: '2026-11-02', session: 'Sosialisasi Sistem NFC & QR MMC' },
+    { date: '2026-11-02', session: 'Sosialisasi Sistem NFC & QR NMC' },
     { date: '2026-11-05', session: 'Workshop Penyuntingan Video Dokumenter' },
     { date: '2026-11-09', session: 'Produksi Podcast Suara Nedacis' },
     { date: '2026-11-12', session: 'Liputan Gebyar Pentas Seni & Budaya' },
@@ -836,7 +837,7 @@ function seedInitialData() {
       const minute = isLate ? String(16 + (idx % 12)).padStart(2, '0') : String(50 + (idx % 9)).padStart(2, '0');
       const hour = isLate ? '15' : '14';
       const time = `${hour}:${minute}:${String((idx * 7) % 59).padStart(2, '0')}`;
-      insertAtt.run(uid, sess.date, time, method, status, sess.session, 'Pembina MMC', `${sess.date}T${time}.000Z`);
+      insertAtt.run(uid, sess.date, time, method, status, sess.session, 'Pembina NMC', `${sess.date}T${time}.000Z`);
     });
   });
 
@@ -849,7 +850,7 @@ function seedInitialData() {
     null,
     'schedule',
     'Pengingat Jadwal: Praktik Lapangan Fotografi Jurnalistik',
-    'Kegiatan dilaksanakan Senin, 16 November 2026 pukul 15:00 WIB di Lapangan Utama & Studio MMC. Harap membawa kartu pelajar NFC untuk absensi.',
+    'Kegiatan dilaksanakan Senin, 16 November 2026 pukul 15:00 WIB di Lapangan Utama & Studio NMC. Harap membawa kartu pelajar NFC untuk absensi.',
     'jadwal',
     now
   );
@@ -860,5 +861,45 @@ function seedInitialData() {
     '5 anggota menyukai karya "Sudut Pagi Lembah Ciamis dalam Bingkai Dokumenter".',
     'galeri',
     now
+  );
+}
+
+function ensureNmcRebrandMigration(nowIso: string) {
+  const migrated = db.prepare(`SELECT value FROM site_settings WHERE key = 'rebrand_nmc_v1'`).get() as
+    | { value: string }
+    | undefined;
+  if (migrated?.value === '1') return;
+
+  const replaceText = (sqlTable: string, col: string) => {
+    db.prepare(
+      `UPDATE ${sqlTable}
+       SET ${col} = REPLACE(REPLACE(REPLACE(REPLACE(${col}, 'Multimedia Media Center (MMC)', 'Nedacis Media Center (NMC)'), 'Multimedia Media Center', 'Nedacis Media Center'), 'MMC-', 'NMC-'), 'MMC', 'NMC')
+       WHERE ${col} LIKE '%MMC%' OR ${col} LIKE '%Multimedia Media Center%'`
+    ).run();
+  };
+
+  replaceText('users', 'bio');
+  replaceText('users', 'qr_code_token');
+  replaceText('news_articles', 'title');
+  replaceText('news_articles', 'summary');
+  replaceText('news_articles', 'content');
+  replaceText('news_articles', 'author_name');
+  replaceText('schedules', 'title');
+  replaceText('schedules', 'location');
+  replaceText('schedules', 'description');
+  replaceText('schedules', 'mentor');
+  replaceText('works', 'title');
+  replaceText('works', 'description');
+  replaceText('lms_tasks', 'title');
+  replaceText('lms_tasks', 'description');
+  replaceText('lms_task_stages', 'title');
+  replaceText('lms_task_stages', 'content');
+  replaceText('attendance_records', 'session_title');
+  replaceText('attendance_records', 'recorded_by');
+  replaceText('notifications', 'title');
+  replaceText('notifications', 'message');
+
+  db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('rebrand_nmc_v1', '1', ?)`).run(
+    nowIso
   );
 }

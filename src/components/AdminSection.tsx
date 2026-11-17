@@ -485,9 +485,9 @@ export function AdminSection({
           nis: nis.trim(),
           kelas,
           division,
-          bio: `Peserta aktif divisi ${division} Multimedia Media Center SMPN 2 Ciamis.`,
+          bio: `Peserta aktif divisi ${division} Nedacis Media Center SMPN 2 Ciamis.`,
           nfc_uid: (nfcUid || `04${Date.now().toString(16).slice(-8)}`).toUpperCase(),
-          qr_code_token: `MMC-${cleanUser.toUpperCase().slice(0, 8)}`,
+          qr_code_token: `NMC-${cleanUser.toUpperCase().slice(0, 8)}`,
           avatar_color: '#1D4ED8',
           show_in_members: true,
           password: password.trim() || undefined,
@@ -660,7 +660,7 @@ export function AdminSection({
           category: newsCategory,
           summary: newsSummary,
           content: newsContent,
-          authorName: 'Pembina MMC SMPN 2 Ciamis',
+          authorName: 'Pembina NMC SMPN 2 Ciamis',
           publishedAt,
         });
         createdArticle = {
@@ -672,7 +672,7 @@ export function AdminSection({
           summary: newsSummary,
           content: newsContent,
           image_url: 'asset:news_liputan',
-          author_name: 'Pembina MMC SMPN 2 Ciamis',
+          author_name: 'Pembina NMC SMPN 2 Ciamis',
           published_at: publishedAt,
           is_featured: 0,
         };
@@ -994,7 +994,7 @@ export function AdminSection({
           division: taskDivision,
           pointsReward: Number(taskPoints) || 100,
           dueDate: taskDueDate,
-          creatorName: 'Pembina MMC',
+          creatorName: 'Pembina NMC',
           stages: draftStages.map((s) => ({
             stage_type: s.stage_type,
             title: s.title,
@@ -1013,7 +1013,7 @@ export function AdminSection({
           due_date: taskDueDate,
           is_published: 1,
           created_by: 0,
-          creator_name: 'Pembina MMC',
+          creator_name: 'Pembina NMC',
           created_at: new Date().toISOString(),
           stages: draftStages.map((s, idx) => ({
             id: taskNumId + idx + 1,
@@ -1266,7 +1266,7 @@ export function AdminSection({
         <div className="border-b border-slate-200 pb-6 flex flex-col sm:flex-row sm:items-end justify-between gap-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-widest text-[#B91C1C]">
-              Kurasi Pembina · MMC SMPN 2 Ciamis
+              Kurasi Pembina · NMC SMPN 2 Ciamis
             </p>
             <h1 className="text-2xl sm:text-3xl font-semibold text-slate-900 tracking-tight mt-1">
               Persetujuan Konten &amp; Karya Siswa
@@ -1298,10 +1298,10 @@ export function AdminSection({
       {/* Editorial Full-Page Header */}
       <div className="border-b border-slate-200 pb-6">
         <p className="text-xs font-semibold uppercase tracking-widest text-[#B91C1C]">
-          Administrasi Ekstrakurikuler · MMC SMPN 2 Ciamis
+          Administrasi Ekstrakurikuler · NMC SMPN 2 Ciamis
         </p>
         <h1 className="text-2xl sm:text-3xl font-semibold text-slate-900 tracking-tight mt-1">
-          Panel Admin &amp; Pembina MMC
+          Panel Admin &amp; Pembina NMC
         </h1>
         <p className="text-sm text-slate-600 mt-1 max-w-2xl">
           Kelola 20 akun siswa, pembina, dan kartu NFC, tinjau persetujuan karya anggota, atur filter komentar negatif, terbitkan liputan sekolah, serta ubah logo header NMC.
@@ -2342,7 +2342,7 @@ export function AdminSection({
                   required
                   value={newsTitle}
                   onChange={(e) => setNewsTitle(e.target.value)}
-                  placeholder="Contoh: Tim MMC Liput Kejuaraan Lomba Pramuka Tingkat Kabupaten"
+                  placeholder="Contoh: Tim NMC Liput Kejuaraan Lomba Pramuka Tingkat Kabupaten"
                   className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl"
                 />
               </div>
@@ -2721,7 +2721,7 @@ export function AdminSection({
                               prev.map((x) => (x.id === item.id ? { ...x, url: e.target.value } : x))
                             )
                           }
-                          placeholder="https://instagram.com/mmc.smpn2ciamis"
+                          placeholder="https://instagram.com/nmc.smpn2ciamis"
                           className="w-full px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-xl"
                         />
                       </div>
@@ -2980,7 +2980,7 @@ export function AdminSection({
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = `mmc_smpn2_ciamis_backup_${new Date().toISOString().slice(0, 10)}.db`;
+                      a.download = `nmc_smpn2_ciamis_backup_${new Date().toISOString().slice(0, 10)}.db`;
                       document.body.appendChild(a);
                       a.click();
                       a.remove();
@@ -3009,7 +3009,7 @@ export function AdminSection({
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = `mmc_smpn2_ciamis_backup_${new Date().toISOString().slice(0, 10)}.json`;
+                      a.download = `nmc_smpn2_ciamis_backup_${new Date().toISOString().slice(0, 10)}.json`;
                       document.body.appendChild(a);
                       a.click();
                       a.remove();

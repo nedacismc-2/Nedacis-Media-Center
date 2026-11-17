@@ -177,7 +177,7 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
 function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction) {
   const user = getUserFromRequest(req);
   if (!user || user.role !== 'admin') {
-    res.status(403).json({ error: 'Akses khusus Pembina / Admin MMC SMPN 2 Ciamis.' });
+    res.status(403).json({ error: 'Akses khusus Pembina / Admin NMC SMPN 2 Ciamis.' });
     return;
   }
   req.user = user;
@@ -410,10 +410,17 @@ app.post('/api/auth/login', (req, res) => {
 
   const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username.trim()) as (AuthUser & { password_hash: string }) | undefined;
   const cleanId = password.trim();
+  const swappedId = cleanId.toUpperCase().startsWith('MMC-')
+    ? `NMC-${cleanId.slice(4)}`
+    : cleanId.toUpperCase().startsWith('NMC-')
+    ? `MMC-${cleanId.slice(4)}`
+    : cleanId;
   const idMatched =
     Boolean(user) &&
     (verifyPassword(cleanId, user!.password_hash) ||
-      (Boolean(user!.qr_code_token) && user!.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase()) ||
+      (Boolean(user!.qr_code_token) &&
+        (user!.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase() ||
+          user!.qr_code_token.trim().toLowerCase() === swappedId.toLowerCase())) ||
       (Boolean(user!.nis) && user!.nis.trim().toLowerCase() === cleanId.toLowerCase()));
 
   if (!user || !idMatched) {
@@ -617,7 +624,7 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
   }
 
   const generatedNfc = (nfc_uid && nfc_uid.trim().toUpperCase()) || `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-  const generatedQr = `MMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const generatedQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
   const colors = ['#1D4ED8', '#0F766E', '#B45309', '#BE123C', '#4338CA', '#0369A1'];
   const avatarColor = colors[studentCount % colors.length];
   const now = new Date().toISOString();
@@ -633,7 +640,7 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
       nis.trim(),
       kelas.trim(),
       division,
-      bio?.trim() || `Anggota aktif Divisi ${division} MMC SMPN 2 Ciamis.`,
+      bio?.trim() || `Anggota aktif Divisi ${division} NMC SMPN 2 Ciamis.`,
       generatedNfc,
       generatedQr,
       avatarColor,
@@ -808,14 +815,25 @@ app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
     cleanCode = urlMatch[1];
   }
 
+  const swappedCode = cleanCode.toUpperCase().startsWith('MMC-')
+    ? `NMC-${cleanCode.slice(4)}`
+    : cleanCode.toUpperCase().startsWith('NMC-')
+    ? `MMC-${cleanCode.slice(4)}`
+    : cleanCode;
   const student = db.prepare(`
     SELECT * FROM users
     WHERE (role = 'student' OR show_in_members = 1)
-      AND (UPPER(nfc_uid) = UPPER(?) OR UPPER(qr_code_token) = UPPER(?) OR LOWER(username) = LOWER(?) OR nis = ?)
-  `).get(cleanCode, cleanCode, cleanCode, cleanCode) as AuthUser | undefined;
+      AND (
+        UPPER(nfc_uid) = UPPER(?)
+        OR UPPER(qr_code_token) = UPPER(?)
+        OR UPPER(qr_code_token) = UPPER(?)
+        OR LOWER(username) = LOWER(?)
+        OR nis = ?
+      )
+  `).get(cleanCode, cleanCode, swappedCode, cleanCode, cleanCode) as AuthUser | undefined;
 
   if (!student) {
-    res.status(404).json({ error: `Kartu / QR "${cleanCode}" tidak terdaftar pada 20 anggota MMC SMPN 2 Ciamis.` });
+    res.status(404).json({ error: `Kartu / QR "${cleanCode}" tidak terdaftar pada 20 anggota NMC SMPN 2 Ciamis.` });
     return;
   }
 
@@ -834,8 +852,8 @@ app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
     resolvedStatus = 'Hadir'; // keep Hadir default for live demo friendliness unless late toggle used, or let's mark based on schedule
   }
 
-  const resolvedSession = session_title?.trim() || 'Pertemuan Rutin Multimedia Media Center';
-  const recordedBy = currentUser ? currentUser.full_name : 'Terminal USB Reader Studio MMC';
+  const resolvedSession = session_title?.trim() || 'Pertemuan Rutin Nedacis Media Center';
+  const recordedBy = currentUser ? currentUser.full_name : 'Terminal USB Reader Studio NMC';
 
   const existingToday = db.prepare(`
     SELECT id FROM attendance_records WHERE user_id = ? AND attendance_date = ?
@@ -1181,7 +1199,7 @@ app.post('/api/works/:id/comments', requireAuth, (req: AuthedRequest, res) => {
     return;
   }
   if (work.comments_disabled) {
-    res.status(403).json({ error: 'Kolom komentar telah dinonaktifkan oleh Pembina MMC untuk postingan ini.' });
+    res.status(403).json({ error: 'Kolom komentar telah dinonaktifkan oleh Pembina NMC untuk postingan ini.' });
     return;
   }
 
@@ -1192,7 +1210,7 @@ app.post('/api/works/:id/comments', requireAuth, (req: AuthedRequest, res) => {
 
   if (matched) {
     res.status(400).json({
-      error: `Komentar ditahan oleh filter diskusi sehat MMC karena mengandung kata yang tidak pantas ("${matched.word}"). Gunakan bahasa yang santun dan edukatif.`,
+      error: `Komentar ditahan oleh filter diskusi sehat NMC karena mengandung kata yang tidak pantas ("${matched.word}"). Gunakan bahasa yang santun dan edukatif.`,
       filtered: true,
     });
     return;
@@ -1319,7 +1337,7 @@ app.post('/api/schedules', requireAdmin, (req, res) => {
     end_time || '16:30',
     location.trim(),
     (description || '').trim(),
-    mentor?.trim() || 'Pembina MMC'
+    mentor?.trim() || 'Pembina NMC'
   );
 
   const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(info.lastInsertRowid);
@@ -1351,7 +1369,7 @@ app.post('/api/schedules/:id/remind', requireAdmin, (req, res) => {
     userId: null,
     type: 'schedule',
     title: `Pengingat Kegiatan: ${sched.title}`,
-    message: `Seluruh peserta didik MMC diingatkan hadir pada ${sched.event_date} pukul ${sched.start_time} ${tzLabel} di ${sched.location}.`,
+    message: `Seluruh peserta didik NMC diingatkan hadir pada ${sched.event_date} pukul ${sched.start_time} ${tzLabel} di ${sched.location}.`,
     linkTarget: 'jadwal',
   });
 
@@ -2048,14 +2066,14 @@ app.get('/api/admin/database/export', requireAdmin, async (_req, res) => {
     return;
   }
   const stamp = new Date().toISOString().slice(0, 10);
-  res.download(backupPath, `mmc_smpn2_ciamis_backup_${stamp}.db`);
+  res.download(backupPath, `nmc_smpn2_ciamis_backup_${stamp}.db`);
 });
 
 app.get('/api/admin/database/export-json', requireAdmin, (_req, res) => {
   checkpointDatabase('PASSIVE');
   const payload = {
     exportedAt: new Date().toISOString(),
-    app: 'MMC SMPN 2 Ciamis',
+    app: 'NMC SMPN 2 Ciamis',
     users: db
       .prepare(
         `SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, show_in_members, created_at FROM users ORDER BY id ASC`
@@ -2079,7 +2097,7 @@ app.get('/api/admin/database/export-json', requireAdmin, (_req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader(
     'Content-Disposition',
-    `attachment; filename="mmc_smpn2_ciamis_backup_${stamp}.json"`
+    `attachment; filename="nmc_smpn2_ciamis_backup_${stamp}.json"`
   );
   res.send(JSON.stringify(payload, null, 2));
 });
@@ -2123,7 +2141,7 @@ async function startServer() {
 
   const PORT = 3000;
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`MMC SMPN 2 Ciamis server running on http://0.0.0.0:${PORT}`);
+    console.log(`NMC SMPN 2 Ciamis server running on http://0.0.0.0:${PORT}`);
     // Create an initial verified online backup cleanly on boot
     void createVerifiedBackup();
   });

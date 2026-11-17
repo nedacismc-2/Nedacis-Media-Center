@@ -14,7 +14,7 @@
     },
     "UserAccount": {
       "title": "UserAccount",
-      "description": "Private Firebase Auth user profile and optional link to a school MMC member record.",
+      "description": "Private Firebase Auth user profile and optional link to a school NMC member record.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -102,7 +102,7 @@
     },
     "NewsArticle": {
       "title": "NewsArticle",
-      "description": "School journalism and MMC activity article displayed on the Home portal.",
+      "description": "School journalism and NMC activity article displayed on the Home portal.",
       "type": "object",
       "properties": {
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -122,7 +122,7 @@
     },
     "ScheduleEvent": {
       "title": "ScheduleEvent",
-      "description": "MMC extracurricular activity schedule item.",
+      "description": "NMC extracurricular activity schedule item.",
       "type": "object",
       "properties": {
         "title": { "type": "string", "minLength": 1, "maxLength": 180 },

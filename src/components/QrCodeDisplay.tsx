@@ -42,7 +42,7 @@ export function QrCodeDisplay({
     if (!dataUrl) return;
     const link = document.createElement('a');
     link.href = dataUrl;
-    link.download = `${downloadFileName || 'qr-mmc-smpn2ciamis'}.png`;
+    link.download = `${downloadFileName || 'qr-nmc-smpn2ciamis'}.png`;
     link.click();
   };
 

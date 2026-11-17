@@ -64,7 +64,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       try {
         const userRef = doc(db, 'users', user.uid);
         const userSnap = await getDoc(userRef);
-        const safeName = (user.displayName || user.email?.split('@')[0] || 'Pengguna MMC').slice(0, 120);
+        const safeName = (user.displayName || user.email?.split('@')[0] || 'Pengguna NMC').slice(0, 120);
         const safeEmail = (user.email || '').slice(0, 160);
         const safePhoto = (user.photoURL || '').slice(0, 500);
 

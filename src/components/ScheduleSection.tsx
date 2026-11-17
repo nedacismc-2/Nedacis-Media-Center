@@ -31,7 +31,7 @@ export function ScheduleSection({
   const [eventDate, setEventDate] = useState('2026-11-25');
   const [startTime, setStartTime] = useState('15:00');
   const [endTime, setEndTime] = useState('16:45');
-  const [location, setLocation] = useState('Studio MMC SMPN 2 Ciamis');
+  const [location, setLocation] = useState('Studio NMC SMPN 2 Ciamis');
   const [mentor, setMentor] = useState('Hendra Kusuma, S.Pd.');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
@@ -142,7 +142,7 @@ export function ScheduleSection({
             Agenda &amp; Pengingat Kegiatan
           </p>
           <h1 className="mt-1 font-serif text-3xl font-semibold text-slate-900">
-            Jadwal Kegiatan Ekstrakurikuler MMC
+            Jadwal Kegiatan Ekstrakurikuler NMC
           </h1>
           <p className="mt-1.5 text-sm text-slate-600">
             Seluruh anggota menerima notifikasi pengingat jadwal secara otomatis sebelum kegiatan dimulai.

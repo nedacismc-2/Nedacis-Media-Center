@@ -71,11 +71,19 @@ export async function buildMemberAuthHashes(params: {
   password?: string;
   existingHashes?: string[];
 }): Promise<string[]> {
-  const set = new Set<string>(
-    (params.existingHashes || []).filter((h) => typeof h === 'string' && h.length === 64)
-  );
+  const set = new Set<string>();
+  const qr = params.qrCodeToken?.trim().toLowerCase();
+  const swappedQr = qr
+    ? qr.startsWith('nmc-')
+      ? `mmc-${qr.slice(4)}`
+      : qr.startsWith('mmc-')
+      ? `nmc-${qr.slice(4)}`
+      : undefined
+    : undefined;
+
   const candidates = [
-    params.qrCodeToken?.trim().toLowerCase(),
+    qr,
+    swappedQr,
     params.nis?.trim().toLowerCase(),
     params.password?.trim(),
     params.password?.trim().toLowerCase(),
@@ -84,6 +92,11 @@ export async function buildMemberAuthHashes(params: {
   for (const c of candidates) {
     const hex = await sha256Hex(c);
     set.add(hex);
+  }
+  for (const h of params.existingHashes || []) {
+    if (typeof h === 'string' && h.length === 64) {
+      set.add(h);
+    }
   }
   return Array.from(set).slice(0, 6);
 }
@@ -177,7 +190,7 @@ export function subscribeNewsArticles(
           summary: String(d.summary || ''),
           content: String(d.content || ''),
           image_url: String(d.imageUrl || 'asset:news_liputan'),
-          author_name: String(d.authorName || 'Pembina MMC'),
+          author_name: String(d.authorName || 'Pembina NMC'),
           published_at: String(d.publishedAt || toIsoString(d.createdAt).slice(0, 10)),
           is_featured: d.isFeatured ? 1 : 0,
         };
@@ -209,7 +222,7 @@ export async function createNewsInFirestore(input: {
       summary: clampStr(input.summary, 500),
       content: clampStr(input.content, 6000),
       imageUrl: 'asset:news_liputan',
-      authorName: clampStr(input.authorName || 'Pembina MMC', 120),
+      authorName: clampStr(input.authorName || 'Pembina NMC', 120),
       publishedAt: clampStr(input.publishedAt, 30),
       isFeatured: false,
       isPublished: true,
@@ -248,7 +261,7 @@ export function subscribeSchedules(
           end_time: String(d.endTime || '16:30'),
           location: String(d.location || ''),
           description: String(d.description || ''),
-          mentor: String(d.mentor || 'Pembina MMC'),
+          mentor: String(d.mentor || 'Pembina NMC'),
           reminder_sent: d.reminderSent ? 1 : 0,
         };
       });
@@ -282,7 +295,7 @@ export async function createScheduleInFirestore(input: {
       endTime: clampStr(input.end_time || '16:30', 12),
       location: clampStr(input.location, 160),
       description: clampStr(input.description, 800),
-      mentor: clampStr(input.mentor || 'Pembina MMC', 120),
+      mentor: clampStr(input.mentor || 'Pembina NMC', 120),
       reminderSent: true,
       isPublished: true,
       createdByUid: uid,
@@ -410,16 +423,25 @@ export async function verifyMemberLoginInFirestore(
     throw new Error('Username atau ID Login tidak ditemukan.');
   }
 
+  const swappedId = cleanId.toUpperCase().startsWith('MMC-')
+    ? `NMC-${cleanId.slice(4)}`
+    : cleanId.toUpperCase().startsWith('NMC-')
+    ? `MMC-${cleanId.slice(4)}`
+    : cleanId;
+
   const lowerHash = await sha256Hex(cleanId.toLowerCase());
   const exactHash = await sha256Hex(cleanId);
+  const swappedLowerHash = await sha256Hex(swappedId.toLowerCase());
   const hashes = candidate.auth_hashes || [];
 
   const matched =
     (Boolean(candidate.qr_code_token) &&
-      candidate.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase()) ||
+      (candidate.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase() ||
+        candidate.qr_code_token.trim().toLowerCase() === swappedId.toLowerCase())) ||
     (Boolean(candidate.nis) && candidate.nis.trim().toLowerCase() === cleanId.toLowerCase()) ||
     hashes.includes(lowerHash) ||
-    hashes.includes(exactHash);
+    hashes.includes(exactHash) ||
+    hashes.includes(swappedLowerHash);
 
   if (!matched) {
     throw new Error('Username atau ID Login tidak sesuai.');
@@ -1102,7 +1124,7 @@ export function subscribeLmsTasks(
             due_date: String(d.dueDate || ''),
             is_published: d.isPublished ? 1 : 0,
             created_by: 0,
-            creator_name: String(d.creatorName || 'Pembina MMC'),
+            creator_name: String(d.creatorName || 'Pembina NMC'),
             created_at: toIsoString(d.createdAt),
             stages,
             progress: mappedProgress,
@@ -1154,7 +1176,7 @@ export async function createLmsTaskInFirestore(params: {
       pointsReward: Math.max(1, Math.min(10000, Number(params.pointsReward) || 100)),
       dueDate: clampStr(params.dueDate, 30),
       isPublished: true,
-      creatorName: clampStr(params.creatorName || 'Pembina MMC', 120),
+      creatorName: clampStr(params.creatorName || 'Pembina NMC', 120),
       createdByUid: uid,
       createdAt: serverTimestamp(),
     });
@@ -1246,7 +1268,7 @@ export async function submitLmsTaskInFirestore(params: {
         username: clampStr(params.username, 60),
         kelas: clampStr(params.kelas, 30),
         division: clampStr(params.division, 40),
-        fileUrl: clampStr(params.fileUrl || 'https://mmc-smpn2ciamis.local/submission', 500),
+        fileUrl: clampStr(params.fileUrl || 'https://nmc-smpn2ciamis.local/submission', 500),
         fileName: clampStr(params.fileName || 'tugas-siswa', 200),
         fileType: clampStr(params.fileType, 120),
         submissionNote: clampStr(params.submissionNote, 1000),
@@ -1447,7 +1469,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
       const memberId = sanitizeDocId(`member_${m.username}`);
       const defaultPass = m.role === 'admin' ? 'pembina123' : 'siswa123';
       const authHashes = await buildMemberAuthHashes({
-        qrCodeToken: m.qr_code_token || `MMC-${m.id}`,
+        qrCodeToken: m.qr_code_token || `NMC-${m.id}`,
         nis: m.nis || `NIS-${m.id}`,
         password: defaultPass,
       });
@@ -1459,7 +1481,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         kelas: clampStr(m.kelas, 30),
         division: clampStr(m.division, 40),
         bio: clampStr(m.bio || '', 400),
-        qrCodeToken: clampStr(m.qr_code_token || `MMC-${m.id}`, 60),
+        qrCodeToken: clampStr(m.qr_code_token || `NMC-${m.id}`, 60),
         avatarColor: clampStr(m.avatar_color || '#1D4ED8', 16),
         avatarUrl: clampStr(m.avatar_url || '', 500),
         showInMembers: Boolean(m.show_in_members),
@@ -1476,7 +1498,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         memberId,
         ownerUid: '',
         nis: clampStr(m.nis || `NIS-${m.id}`, 40),
-        nfcUid: clampStr(m.nfc_uid || `04MMC${m.id}`, 64),
+        nfcUid: clampStr(m.nfc_uid || `04NMC${m.id}`, 64),
         email: '',
         updatedAt: serverTimestamp(),
       });
@@ -1558,7 +1580,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         pointsReward: Math.max(1, Math.min(10000, Number(t.points_reward) || 100)),
         dueDate: clampStr(t.due_date || '', 30),
         isPublished: Boolean(t.is_published),
-        creatorName: clampStr(t.creator_name || 'Pembina MMC', 120),
+        creatorName: clampStr(t.creator_name || 'Pembina NMC', 120),
         createdByUid: uid,
         createdAt: serverTimestamp(),
       });
@@ -1583,12 +1605,24 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
   }
 }
 
+function replaceMmcText(text: string): string {
+  return text
+    .replace(/Multimedia Media Center \(MMC\)/g, 'Nedacis Media Center (NMC)')
+    .replace(/Multimedia Media Center/g, 'Nedacis Media Center')
+    .replace(/\bMMC-/g, 'NMC-')
+    .replace(/\bMMC\b/g, 'NMC');
+}
+
 export async function syncMemberAuthHashesAdmin(): Promise<void> {
   if (!auth.currentUser?.uid) return;
   try {
-    const [pubSnap, privSnap] = await Promise.all([
+    const [pubSnap, privSnap, newsSnap, schedSnap, worksSnap, tasksSnap] = await Promise.all([
       getDocs(collection(db, 'members_public')),
       getDocs(collection(db, 'members_private')),
+      getDocs(collection(db, 'news_articles')),
+      getDocs(collection(db, 'schedules')),
+      getDocs(collection(db, 'works')),
+      getDocs(collection(db, 'lms_tasks')),
     ]);
     const nisMap = new Map<string, string>();
     for (const p of privSnap.docs) {
@@ -1601,21 +1635,121 @@ export async function syncMemberAuthHashesAdmin(): Promise<void> {
     for (const mDoc of pubSnap.docs) {
       const d = mDoc.data();
       const existingHashes = Array.isArray(d.authHashes) ? (d.authHashes as string[]) : [];
-      if (existingHashes.length > 0) continue;
+      const currentBio = String(d.bio || '');
+      const nextBio = replaceMmcText(currentBio);
+      const currentQr = String(d.qrCodeToken || '');
+      const nextQr = currentQr.replace(/^MMC-/i, 'NMC-');
       const role = d.role === 'admin' ? 'admin' : 'student';
       const username = String(d.username || '');
       const defaultPass = username === 'admin' ? 'adminmmc' : role === 'admin' ? 'pembina123' : 'siswa123';
-      const hashes = await buildMemberAuthHashes({
-        qrCodeToken: String(d.qrCodeToken || ''),
-        nis: nisMap.get(mDoc.id) || '',
-        password: defaultPass,
-      });
-      if (hashes.length > 0) {
+
+      const needsHashSync = existingHashes.length === 0 || nextQr !== currentQr;
+      const needsRebrand = nextBio !== currentBio || nextQr !== currentQr;
+
+      if (needsHashSync || needsRebrand) {
+        const hashes = await buildMemberAuthHashes({
+          qrCodeToken: nextQr,
+          nis: nisMap.get(mDoc.id) || '',
+          password: defaultPass,
+          existingHashes,
+        });
         batch.update(doc(db, 'members_public', mDoc.id), {
+          bio: clampStr(nextBio, 400),
+          qrCodeToken: clampStr(nextQr || `NMC-${username.toUpperCase().slice(0, 8)}`, 60),
           authHashes: hashes,
           updatedAt: serverTimestamp(),
         });
         pendingUpdates++;
+      }
+    }
+
+    for (const nDoc of newsSnap.docs) {
+      const d = nDoc.data();
+      const title = String(d.title || '');
+      const summary = String(d.summary || '');
+      const content = String(d.content || '');
+      const nextTitle = replaceMmcText(title);
+      const nextSummary = replaceMmcText(summary);
+      const nextContent = replaceMmcText(content);
+      if (nextTitle !== title || nextSummary !== summary || nextContent !== content) {
+        batch.update(doc(db, 'news_articles', nDoc.id), {
+          title: clampStr(nextTitle, 200),
+          summary: clampStr(nextSummary, 500),
+          content: clampStr(nextContent, 6000),
+        });
+        pendingUpdates++;
+      }
+    }
+
+    for (const sDoc of schedSnap.docs) {
+      const d = sDoc.data();
+      const title = String(d.title || '');
+      const location = String(d.location || '');
+      const description = String(d.description || '');
+      const mentor = String(d.mentor || '');
+      const nextTitle = replaceMmcText(title);
+      const nextLocation = replaceMmcText(location);
+      const nextDescription = replaceMmcText(description);
+      const nextMentor = replaceMmcText(mentor);
+      if (
+        nextTitle !== title ||
+        nextLocation !== location ||
+        nextDescription !== description ||
+        nextMentor !== mentor
+      ) {
+        batch.update(doc(db, 'schedules', sDoc.id), {
+          title: clampStr(nextTitle, 180),
+          location: clampStr(nextLocation, 160),
+          description: clampStr(nextDescription, 800),
+          mentor: clampStr(nextMentor, 120),
+        });
+        pendingUpdates++;
+      }
+    }
+
+    for (const wDoc of worksSnap.docs) {
+      const d = wDoc.data();
+      const title = String(d.title || '');
+      const description = String(d.description || '');
+      const nextTitle = replaceMmcText(title);
+      const nextDescription = replaceMmcText(description);
+      if (nextTitle !== title || nextDescription !== description) {
+        batch.update(doc(db, 'works', wDoc.id), {
+          title: clampStr(nextTitle, 140),
+          description: clampStr(nextDescription, 600),
+          updatedAt: serverTimestamp(),
+        });
+        pendingUpdates++;
+      }
+    }
+
+    for (const tDoc of tasksSnap.docs) {
+      const d = tDoc.data();
+      const title = String(d.title || '');
+      const description = String(d.description || '');
+      const nextTitle = replaceMmcText(title);
+      const nextDescription = replaceMmcText(description);
+      if (nextTitle !== title || nextDescription !== description) {
+        batch.update(doc(db, 'lms_tasks', tDoc.id), {
+          title: clampStr(nextTitle, 180),
+          description: clampStr(nextDescription, 1000),
+        });
+        pendingUpdates++;
+      }
+      const stagesSnap = await getDocs(collection(db, 'lms_tasks', tDoc.id, 'stages'));
+      for (const stDoc of stagesSnap.docs) {
+        const sd = stDoc.data();
+        const stTitle = String(sd.title || '');
+        const stContent = String(sd.content || '');
+        const nextStTitle = replaceMmcText(stTitle);
+        const nextStContent = replaceMmcText(stContent);
+        if (nextStTitle !== stTitle || nextStContent !== stContent) {
+          batch.update(doc(db, 'lms_tasks', tDoc.id, 'stages', stDoc.id), {
+            title: clampStr(nextStTitle, 160),
+            content: clampStr(nextStContent, 4000),
+          });
+          pendingUpdates++;
+        }
       }
     }
 
