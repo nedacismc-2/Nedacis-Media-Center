@@ -1,3 +1,5 @@
+import { CloudImage } from './CloudMedia';
+
 interface NmcLogoProps {
   logoUrl: string;
   brandName: string;
@@ -7,7 +9,7 @@ export function NmcLogo({ logoUrl, brandName }: NmcLogoProps) {
   return (
     <span className="inline-flex items-center gap-2.5">
       {logoUrl ? (
-        <img
+        <CloudImage
           src={logoUrl}
           alt={brandName || 'Logo NMC'}
           className="h-9 sm:h-10 w-auto max-w-[160px] object-contain rounded-lg bg-white/10 p-0.5"

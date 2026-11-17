@@ -529,6 +529,28 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidUploadedFile(data) {
+      return data.keys().hasAll(['fileId', 'uploaderUid', 'fileName', 'mimeType', 'sizeBytes', 'chunkCount', 'isPublic', 'createdAt'])
+        && data.keys().hasOnly(['fileId', 'uploaderUid', 'fileName', 'mimeType', 'sizeBytes', 'chunkCount', 'isPublic', 'createdAt'])
+        && isValidId(data.fileId)
+        && isStr(data.uploaderUid, 1, 128)
+        && isStr(data.fileName, 1, 200)
+        && isStr(data.mimeType, 1, 120)
+        && data.sizeBytes is number && data.sizeBytes >= 1 && data.sizeBytes <= 20000000
+        && data.chunkCount is number && data.chunkCount >= 1 && data.chunkCount <= 60
+        && data.isPublic is bool
+        && data.createdAt is timestamp;
+    }
+
+    function isValidUploadedFileChunk(data) {
+      return data.keys().hasAll(['fileId', 'uploaderUid', 'chunkIndex', 'data'])
+        && data.keys().hasOnly(['fileId', 'uploaderUid', 'chunkIndex', 'data'])
+        && isValidId(data.fileId)
+        && isStr(data.uploaderUid, 1, 128)
+        && data.chunkIndex is number && data.chunkIndex >= 0 && data.chunkIndex < 60
+        && isStr(data.data, 1, 700000);
+    }
+
     // ==================== COLLECTION RULES ====================
 
     match /admins/{adminId} {
@@ -970,6 +992,50 @@ service cloud.firestore {
           || (existing().targetUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isRead']))
         );
       allow delete: if isValidId(notifId) && isAdmin();
+    }
+
+    match /uploaded_files/{fileId} {
+      allow get: if isValidId(fileId) && (
+        existing().isPublic == true
+        || isAdmin()
+        || (isVerifiedUser() && existing().uploaderUid == request.auth.uid)
+      );
+      allow list: if isAdmin() || (isVerifiedUser() && existing().uploaderUid == request.auth.uid);
+      allow create: if isValidId(fileId)
+        && isVerifiedUser()
+        && isValidUploadedFile(incoming())
+        && incoming().fileId == fileId
+        && incoming().uploaderUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(fileId) && (isAdmin() || (isVerifiedUser() && existing().uploaderUid == request.auth.uid));
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(fileId)
+          && isValidId(chunkId)
+          && (
+            get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.isPublic == true
+            || isAdmin()
+            || (isVerifiedUser() && get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.uploaderUid == request.auth.uid)
+          );
+        allow list: if isValidId(fileId)
+          && (
+            get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.isPublic == true
+            || isAdmin()
+            || (isVerifiedUser() && get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.uploaderUid == request.auth.uid)
+          );
+        allow create: if isValidId(fileId)
+          && isValidId(chunkId)
+          && isVerifiedUser()
+          && isValidUploadedFileChunk(incoming())
+          && incoming().fileId == fileId
+          && incoming().uploaderUid == request.auth.uid
+          && get(/databases/$(database)/documents/uploaded_files/$(fileId)).data.uploaderUid == request.auth.uid;
+        allow update: if false;
+        allow delete: if isValidId(fileId)
+          && isValidId(chunkId)
+          && (isAdmin() || (isVerifiedUser() && existing().uploaderUid == request.auth.uid));
+      }
     }
   }
 }

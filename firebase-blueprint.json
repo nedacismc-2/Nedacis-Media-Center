@@ -315,6 +315,34 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["targetUid", "type", "title", "message", "isRead", "createdAt"]
+    },
+    "UploadedFile": {
+      "title": "UploadedFile",
+      "description": "Cross-device uploaded file metadata stored in Cloud Firestore (referenced via cloudfile://{fileId}).",
+      "type": "object",
+      "properties": {
+        "fileId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uploaderUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "mimeType": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "sizeBytes": { "type": "number" },
+        "chunkCount": { "type": "number" },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fileId", "uploaderUid", "fileName", "mimeType", "sizeBytes", "chunkCount", "isPublic", "createdAt"]
+    },
+    "UploadedFileChunk": {
+      "title": "UploadedFileChunk",
+      "description": "Ordered Base64 chunk belonging to an UploadedFile document.",
+      "type": "object",
+      "properties": {
+        "fileId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uploaderUid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "chunkIndex": { "type": "number" },
+        "data": { "type": "string", "minLength": 1, "maxLength": 700000 }
+      },
+      "required": ["fileId", "uploaderUid", "chunkIndex", "data"]
     }
   },
   "firestore": {
@@ -385,6 +413,14 @@
     "/notifications/{notifId}": {
       "schema": { "$ref": "#/entities/Notification" },
       "description": "User-targeted or broadcast portal notifications."
+    },
+    "/uploaded_files/{fileId}": {
+      "schema": { "$ref": "#/entities/UploadedFile" },
+      "description": "Metadata for uploaded images, videos, audio, and documents synced across devices."
+    },
+    "/uploaded_files/{fileId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/UploadedFileChunk" },
+      "description": "Ordered Base64 chunks belonging to an uploaded file."
     }
   }
 }

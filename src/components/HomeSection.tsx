@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { ArrowRight, Award, BookOpen, Calendar, Clock, MapPin, X } from 'lucide-react';
 import type { LmsTask, NewsArticle, ScheduleItem, SiteBranding, StudentProfile, StudentWork } from '../types';
-import { HERO_IMAGE, formatDateID, resolveMediaUrl } from '../lib/mediaAssets';
+import { HERO_IMAGE, formatDateID } from '../lib/mediaAssets';
+import { CloudImage, CloudVideo } from './CloudMedia';
 
 interface HomeSectionProps {
   news: NewsArticle[];
@@ -120,8 +121,9 @@ export function HomeSection({
         </div>
 
         <div className="lg:col-span-6 relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 min-h-[280px] lg:min-h-[420px]">
-          <img
-            src={siteBranding.heroImageUrl ? resolveMediaUrl(siteBranding.heroImageUrl) : HERO_IMAGE}
+          <CloudImage
+            src={siteBranding.heroImageUrl || HERO_IMAGE}
+            fallbackSrc={HERO_IMAGE}
             alt={siteBranding.heroTitle || 'Anggota Nedacis Media Center SMPN 2 Ciamis di ruang produksi studio'}
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover"
@@ -186,8 +188,8 @@ export function HomeSection({
               className="lg:col-span-7 group cursor-pointer bg-white border border-slate-200 rounded-2xl overflow-hidden flex flex-col hover:border-slate-300 transition-colors"
             >
               <div className="aspect-[16/10] w-full bg-slate-100 overflow-hidden">
-                <img
-                  src={resolveMediaUrl(leadArticle.image_url)}
+                <CloudImage
+                  src={leadArticle.image_url}
                   alt={leadArticle.title}
                   referrerPolicy="no-referrer"
                   className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
@@ -226,8 +228,8 @@ export function HomeSection({
                 className="p-5 sm:p-6 flex gap-4 cursor-pointer hover:bg-slate-50 transition-colors"
               >
                 <div className="w-24 h-24 sm:w-28 sm:h-24 shrink-0 rounded-xl overflow-hidden bg-slate-100 border border-slate-200">
-                  <img
-                    src={resolveMediaUrl(article.image_url)}
+                  <CloudImage
+                    src={article.image_url}
                     alt={article.title}
                     referrerPolicy="no-referrer"
                     className="w-full h-full object-cover"
@@ -318,15 +320,15 @@ export function HomeSection({
               >
                 <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
                   {work.media_type === 'video' ? (
-                    <video
-                      src={resolveMediaUrl(work.media_url)}
+                    <CloudVideo
+                      src={work.media_url}
                       className="w-full h-full object-cover"
                       muted
                       playsInline
                     />
                   ) : (
-                    <img
-                      src={resolveMediaUrl(work.media_url)}
+                    <CloudImage
+                      src={work.media_url}
                       alt={work.title}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300"
@@ -379,8 +381,8 @@ export function HomeSection({
               </h2>
               <p className="text-xs text-slate-500">Ditulis oleh {selectedArticle.author_name}</p>
               <div className="aspect-[16/10] rounded-xl overflow-hidden bg-slate-100 border border-slate-200">
-                <img
-                  src={resolveMediaUrl(selectedArticle.image_url)}
+                <CloudImage
+                  src={selectedArticle.image_url}
                   alt={selectedArticle.title}
                   referrerPolicy="no-referrer"
                   className="w-full h-full object-cover"

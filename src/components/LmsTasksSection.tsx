@@ -14,8 +14,11 @@ import {
 import type { LmsTask, LmsTaskStage, StudentProfile } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
+import { uploadFileToCloud } from '../lib/cloudFiles';
+import { useFirebase } from '../context/FirebaseContext';
 import { completeLmsStageInFirestore, submitLmsTaskInFirestore } from '../lib/firestoreSync';
-import { formatDateID, resolveMediaUrl } from '../lib/mediaAssets';
+import { formatDateID } from '../lib/mediaAssets';
+import { CloudFileAttachment } from './CloudMedia';
 
 interface LmsTasksSectionProps {
   currentUser: StudentProfile;
@@ -32,11 +35,13 @@ export function LmsTasksSection({
   onTaskUpdated,
   onToast,
 }: LmsTasksSectionProps) {
+  const { firebaseUser, signInWithGoogle } = useFirebase();
   const [filter, setFilter] = useState<'all' | 'pending' | 'done'>('all');
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(
     initialSelectedTaskId ?? (tasks[0]?.id || null)
   );
   const [activeStageIdx, setActiveStageIdx] = useState<number>(0);
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
 
   // Practice stage input
   const [practiceNotes, setPracticeNotes] = useState<Record<number, string>>({});
@@ -172,14 +177,16 @@ export function LmsTasksSection({
       let fileName = uploadFile?.name || task.submission?.file_name || 'tugas-siswa';
       let fileType = uploadFile?.type || task.submission?.file_type || '';
 
-      if (getStoredToken()) {
-        try {
+      if (uploadFile) {
+        if (auth.currentUser) {
+          const uploaded = await uploadFileToCloud(uploadFile, { isPublic: false });
+          fileUrl = uploaded.cloudUrl;
+          fileName = uploaded.fileName;
+          fileType = uploaded.mimeType;
+        } else if (getStoredToken()) {
           const formData = new FormData();
-          if (uploadFile) {
-            formData.append('file', uploadFile);
-          }
+          formData.append('file', uploadFile);
           formData.append('submissionNote', submissionNote.trim());
-
           const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
             method: 'POST',
             body: formData,
@@ -190,17 +197,17 @@ export function LmsTasksSection({
             fileUrl = res.task.submission.file_url;
             fileName = res.task.submission.file_name || fileName;
           }
-        } catch (err) {
-          if (!auth.currentUser || !task.firestoreId) throw err;
+        } else {
+          throw new Error(
+            'Hubungkan akun Google terlebih dahulu agar file tugas dapat diunggah dan tersinkron di semua perangkat.'
+          );
         }
       }
 
       if (auth.currentUser && task.firestoreId) {
-        const finalFileUrl =
-          fileUrl || `https://nmc-smpn2ciamis.local/submission/${encodeURIComponent(fileName)}`;
         const subId = await submitLmsTaskInFirestore({
           taskId: task.firestoreId,
-          fileUrl: finalFileUrl,
+          fileUrl,
           fileName,
           fileType,
           submissionNote: submissionNote.trim(),
@@ -210,27 +217,41 @@ export function LmsTasksSection({
           kelas: currentUser.kelas,
           division: currentUser.division,
         });
-        if (!updatedTask) {
-          updatedTask = {
-            ...task,
-            submission: {
-              id: Date.now(),
-              firestoreId: subId,
-              userUid: auth.currentUser.uid,
-              task_id: task.id,
-              user_id: currentUser.id,
-              file_url: finalFileUrl,
-              file_name: fileName,
-              file_type: fileType,
-              submission_note: submissionNote.trim(),
-              status: 'submitted',
-              points_awarded: 0,
-              admin_feedback: '',
-              submitted_at: new Date().toISOString(),
-              reviewed_at: '',
-            },
-          };
+        updatedTask = {
+          ...task,
+          submission: {
+            id: Date.now(),
+            firestoreId: subId,
+            userUid: auth.currentUser.uid,
+            task_id: task.id,
+            user_id: currentUser.id,
+            file_url: fileUrl,
+            file_name: fileName,
+            file_type: fileType,
+            submission_note: submissionNote.trim(),
+            status: 'submitted',
+            points_awarded: 0,
+            admin_feedback: '',
+            submitted_at: new Date().toISOString(),
+            reviewed_at: '',
+          },
+        };
+
+        if (getStoredToken()) {
+          const mirrorForm = new FormData();
+          if (uploadFile) mirrorForm.append('file', uploadFile);
+          mirrorForm.append('submissionNote', submissionNote.trim());
+          void apiFetch(`/api/tasks/${task.id}/submit`, { method: 'POST', body: mirrorForm }).catch(() => {});
         }
+      } else if (!updatedTask && getStoredToken()) {
+        const formData = new FormData();
+        formData.append('submissionNote', submissionNote.trim());
+        const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
+          method: 'POST',
+          body: formData,
+        });
+        updatedTask = res.task;
+        nextTotalPoints = res.totalPoints;
       }
 
       if (updatedTask) {
@@ -249,9 +270,6 @@ export function LmsTasksSection({
       setSubmittingTask(false);
     }
   };
-
-  const isImageUrl = (url: string) => /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(url);
-  const isVideoUrl = (url: string) => /\.(mp4|webm|mov)$/i.test(url);
 
   const stageTypeLabel = (type: LmsTaskStage['stage_type']) => {
     if (type === 'reading') return 'Materi Bacaan';
@@ -544,28 +562,17 @@ export function LmsTasksSection({
                     {stage.attachment_url && (
                       <div className="border border-slate-200 rounded-xl p-4 bg-white space-y-3">
                         <p className="text-xs font-semibold text-slate-700">Lampiran Materi Pembina</p>
-                        {isImageUrl(stage.attachment_url) ? (
-                          <img
-                            src={resolveMediaUrl(stage.attachment_url)}
-                            alt={stage.title}
-                            className="max-h-72 rounded-lg object-contain border border-slate-200"
-                          />
-                        ) : isVideoUrl(stage.attachment_url) ? (
-                          <video
-                            src={resolveMediaUrl(stage.attachment_url)}
-                            controls
-                            className="w-full max-h-72 rounded-lg border border-slate-200"
-                          />
-                        ) : null}
-                        <a
-                          href={resolveMediaUrl(stage.attachment_url)}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                        <CloudFileAttachment
+                          url={stage.attachment_url}
+                          title={stage.title}
+                          linkLabel={
+                            <>
+                              <FileText className="w-4 h-4" />
+                              Buka / Unduh Lampiran Materi
+                            </>
+                          }
                           className="inline-flex items-center gap-2 text-xs font-semibold text-[#1D4ED8] hover:underline"
-                        >
-                          <FileText className="w-4 h-4" />
-                          Buka / Unduh Lampiran Materi
-                        </a>
+                        />
                       </div>
                     )}
 
@@ -678,31 +685,47 @@ export function LmsTasksSection({
                             )}
 
                             {selectedTask.submission.file_url && (
-                              <div className="pt-1 space-y-2">
-                                {isImageUrl(selectedTask.submission.file_url) ? (
-                                  <img
-                                    src={resolveMediaUrl(selectedTask.submission.file_url)}
-                                    alt={selectedTask.submission.file_name}
-                                    className="max-h-56 rounded-lg object-contain border border-slate-200 bg-white"
-                                  />
-                                ) : isVideoUrl(selectedTask.submission.file_url) ? (
-                                  <video
-                                    src={resolveMediaUrl(selectedTask.submission.file_url)}
-                                    controls
-                                    className="w-full max-h-56 rounded-lg border border-slate-200 bg-black"
-                                  />
-                                ) : null}
-                                <a
-                                  href={resolveMediaUrl(selectedTask.submission.file_url)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
+                              <div className="pt-1">
+                                <CloudFileAttachment
+                                  url={selectedTask.submission.file_url}
+                                  fileName={selectedTask.submission.file_name}
+                                  fileType={selectedTask.submission.file_type}
+                                  linkLabel={
+                                    <>
+                                      <FileText className="w-3.5 h-3.5" />
+                                      File Terkirim: {selectedTask.submission.file_name || 'Lihat / Unduh File Tugas'}
+                                    </>
+                                  }
                                   className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1D4ED8] hover:underline"
-                                >
-                                  <FileText className="w-3.5 h-3.5" />
-                                  File Terkirim: {selectedTask.submission.file_name || 'Lihat File Tugas'}
-                                </a>
+                                />
                               </div>
                             )}
+                          </div>
+                        )}
+
+                        {!firebaseUser && (
+                          <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                            <p className="text-xs text-amber-900 leading-relaxed">
+                              Hubungkan akun Google terlebih dahulu agar file hasil tugas dapat diunggah dan tersimpan ke Cloud.
+                            </p>
+                            <button
+                              type="button"
+                              disabled={connectingGoogle}
+                              onClick={async () => {
+                                setConnectingGoogle(true);
+                                try {
+                                  await signInWithGoogle();
+                                  onToast('Akun Google terhubung! Anda siap mengunggah file tugas.', 'success');
+                                } catch (err) {
+                                  onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google.', 'error');
+                                } finally {
+                                  setConnectingGoogle(false);
+                                }
+                              }}
+                              className="px-3 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-lg whitespace-nowrap shrink-0"
+                            >
+                              {connectingGoogle ? 'Menghubungkan...' : 'Hubungkan Google untuk Upload'}
+                            </button>
                           </div>
                         )}
 
@@ -710,8 +733,8 @@ export function LmsTasksSection({
                           <div>
                             <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                               {selectedTask.submission
-                                ? 'Ganti / Unggah Ulang File Hasil Tugas (maks 50MB)'
-                                : 'Upload File Hasil Tugas (Foto, Video, PDF, Dokumen, Audio, atau ZIP · maks 50MB)'}
+                                ? 'Ganti / Unggah Ulang File Hasil Tugas (maks 15MB)'
+                                : 'Upload File Hasil Tugas (Foto, Video, PDF, Dokumen, Audio, atau ZIP · maks 15MB)'}
                             </label>
                             <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
                               <UploadCloud className="w-6 h-6 text-[#1D4ED8]" />

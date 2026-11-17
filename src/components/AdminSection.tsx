@@ -38,6 +38,7 @@ import type {
 } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
+import { uploadFileToCloud } from '../lib/cloudFiles';
 import {
   addBlockedWordInFirestore,
   createLmsTaskInFirestore,
@@ -51,7 +52,8 @@ import {
   saveSiteSettingsToFirestore,
   saveStudentToFirestore,
 } from '../lib/firestoreSync';
-import { HERO_IMAGE, formatDateID, formatTimeAgo, resolveMediaUrl } from '../lib/mediaAssets';
+import { HERO_IMAGE, formatDateID, formatTimeAgo } from '../lib/mediaAssets';
+import { CloudFileAttachment, CloudImage, CloudVideo } from './CloudMedia';
 import { NmcLogo } from './NmcLogo';
 import { SocialSilhouetteIcon } from './SocialSilhouetteIcon';
 
@@ -713,7 +715,20 @@ export function AdminSection({
         brandName: brandNameInput,
         footerAddress: footerAddressInput,
       };
-      if (getStoredToken()) {
+      if (auth.currentUser && isFirebaseAdmin) {
+        if (logoFile) {
+          const uploaded = await uploadFileToCloud(logoFile, { isPublic: true, maxDimension: 800 });
+          nextBranding = { ...nextBranding, logoUrl: uploaded.cloudUrl };
+        }
+        await saveSiteSettingsToFirestore(nextBranding);
+        if (getStoredToken()) {
+          const formData = new FormData();
+          formData.append('brandName', brandNameInput);
+          formData.append('footerAddress', footerAddressInput);
+          if (logoFile) formData.append('logo', logoFile);
+          void apiFetch('/api/admin/site-logo', { method: 'POST', body: formData }).catch(() => {});
+        }
+      } else if (getStoredToken()) {
         const formData = new FormData();
         formData.append('brandName', brandNameInput);
         formData.append('footerAddress', footerAddressInput);
@@ -723,17 +738,14 @@ export function AdminSection({
         const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/site-logo', {
           method: 'POST',
           body: formData,
-        }).catch((err) => {
-          if (!auth.currentUser || !isFirebaseAdmin || logoFile) throw err;
-          return null;
         });
         if (res?.siteSettings) {
           nextBranding = res.siteSettings;
         }
+      } else {
+        throw new Error('Masuk dengan akun Google Admin terlebih dahulu untuk mengunggah logo ke Cloud.');
       }
-      if (auth.currentUser && isFirebaseAdmin) {
-        await saveSiteSettingsToFirestore(nextBranding);
-      }
+
       onBrandingUpdated(nextBranding);
       if (logoPreviewUrl) {
         URL.revokeObjectURL(logoPreviewUrl);
@@ -847,16 +859,26 @@ export function AdminSection({
   const handleUploadSocialIcon = async (id: string, file: File) => {
     setUploadingIconId(id);
     try {
-      const fd = new FormData();
-      fd.append('icon', file);
-      const res = await apiFetch<{ iconUrl: string }>('/api/admin/social-icon', {
-        method: 'POST',
-        body: fd,
-      });
+      let iconUrl = '';
+      if (auth.currentUser && isFirebaseAdmin) {
+        const uploaded = await uploadFileToCloud(file, { isPublic: true, maxDimension: 512 });
+        iconUrl = uploaded.cloudUrl;
+      } else if (getStoredToken()) {
+        const fd = new FormData();
+        fd.append('icon', file);
+        const res = await apiFetch<{ iconUrl: string }>('/api/admin/social-icon', {
+          method: 'POST',
+          body: fd,
+        });
+        iconUrl = res.iconUrl;
+      } else {
+        throw new Error('Masuk dengan akun Google Admin terlebih dahulu untuk mengunggah ikon kustom.');
+      }
+
       setSocialLinksInput((prev) =>
-        prev.map((item) => (item.id === id ? { ...item, customIconUrl: res.iconUrl } : item))
+        prev.map((item) => (item.id === id ? { ...item, customIconUrl: iconUrl } : item))
       );
-      onToast('Ikon siluet kustom diunggah. Klik Simpan Media Sosial untuk menerapkan.', 'success');
+      onToast('Ikon siluet kustom berhasil diunggah ke Cloud. Klik Simpan Media Sosial untuk menerapkan.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal mengunggah ikon.', 'error');
     } finally {
@@ -874,7 +896,21 @@ export function AdminSection({
         heroTitle: heroTitleInput,
         heroDescription: heroDescInput,
       };
-      if (getStoredToken()) {
+      if (auth.currentUser && isFirebaseAdmin) {
+        if (heroImageFile) {
+          const uploaded = await uploadFileToCloud(heroImageFile, { isPublic: true, maxDimension: 1800 });
+          nextBranding = { ...nextBranding, heroImageUrl: uploaded.cloudUrl };
+        }
+        await saveSiteSettingsToFirestore(nextBranding);
+        if (getStoredToken()) {
+          const formData = new FormData();
+          formData.append('heroEyebrow', heroEyebrowInput);
+          formData.append('heroTitle', heroTitleInput);
+          formData.append('heroDescription', heroDescInput);
+          if (heroImageFile) formData.append('heroImage', heroImageFile);
+          void apiFetch('/api/admin/hero-settings', { method: 'POST', body: formData }).catch(() => {});
+        }
+      } else if (getStoredToken()) {
         const formData = new FormData();
         formData.append('heroEyebrow', heroEyebrowInput);
         formData.append('heroTitle', heroTitleInput);
@@ -885,15 +921,12 @@ export function AdminSection({
         const res = await apiFetch<{ siteSettings: SiteBranding }>('/api/admin/hero-settings', {
           method: 'POST',
           body: formData,
-        }).catch((err) => {
-          if (!auth.currentUser || !isFirebaseAdmin || heroImageFile) throw err;
-          return null;
         });
         if (res?.siteSettings) nextBranding = res.siteSettings;
+      } else {
+        throw new Error('Masuk dengan akun Google Admin terlebih dahulu untuk mengunggah foto hero ke Cloud.');
       }
-      if (auth.currentUser && isFirebaseAdmin) {
-        await saveSiteSettingsToFirestore(nextBranding);
-      }
+
       onBrandingUpdated(nextBranding);
       if (heroPreviewUrl) {
         URL.revokeObjectURL(heroPreviewUrl);
@@ -946,16 +979,29 @@ export function AdminSection({
   const handleUploadStageMaterial = async (stageKey: string, file: File) => {
     setUploadingStageKey(stageKey);
     try {
-      const fd = new FormData();
-      fd.append('file', file);
-      const res = await apiFetch<{ fileUrl: string; fileName: string }>('/api/admin/tasks/upload-material', {
-        method: 'POST',
-        body: fd,
-      });
+      let fileUrl = '';
+      let fileName = file.name;
+      if (auth.currentUser && isFirebaseAdmin) {
+        const uploaded = await uploadFileToCloud(file, { isPublic: true });
+        fileUrl = uploaded.cloudUrl;
+        fileName = uploaded.fileName;
+      } else if (getStoredToken()) {
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await apiFetch<{ fileUrl: string; fileName: string }>('/api/admin/tasks/upload-material', {
+          method: 'POST',
+          body: fd,
+        });
+        fileUrl = res.fileUrl;
+        fileName = res.fileName;
+      } else {
+        throw new Error('Masuk dengan akun Google Admin terlebih dahulu untuk mengunggah lampiran materi.');
+      }
+
       setDraftStages((prev) =>
-        prev.map((st) => (st.key === stageKey ? { ...st, attachment_url: res.fileUrl } : st))
+        prev.map((st) => (st.key === stageKey ? { ...st, attachment_url: fileUrl } : st))
       );
-      onToast(`File materi "${res.fileName}" berhasil dilampirkan.`, 'success');
+      onToast(`File materi "${fileName}" berhasil diunggah & dilampirkan ke Cloud.`, 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal mengunggah lampiran materi.', 'error');
     } finally {
@@ -1198,10 +1244,10 @@ export function AdminSection({
             >
               <div className="md:col-span-5 aspect-[4/3] bg-slate-100 rounded-xl overflow-hidden border border-slate-200">
                 {work.media_type === 'video' ? (
-                  <video src={resolveMediaUrl(work.media_url)} controls className="w-full h-full object-cover" />
+                  <CloudVideo src={work.media_url} controls className="w-full h-full object-cover" />
                 ) : (
-                  <img
-                    src={resolveMediaUrl(work.media_url)}
+                  <CloudImage
+                    src={work.media_url}
                     alt={work.title}
                     className="w-full h-full object-cover"
                   />
@@ -2064,14 +2110,12 @@ export function AdminSection({
                           </label>
                           {st.attachment_url && (
                             <div className="flex items-center gap-3">
-                              <a
-                                href={resolveMediaUrl(st.attachment_url)}
-                                target="_blank"
-                                rel="noopener noreferrer"
+                              <CloudFileAttachment
+                                url={st.attachment_url}
+                                showPreview={false}
+                                linkLabel="Lampiran Terpasang"
                                 className="text-emerald-700 font-medium hover:underline"
-                              >
-                                Lampiran Terpasang
-                              </a>
+                              />
                               <button
                                 type="button"
                                 onClick={() =>
@@ -2205,15 +2249,19 @@ export function AdminSection({
                                       </div>
 
                                       {sub.file_url && (
-                                        <a
-                                          href={resolveMediaUrl(sub.file_url)}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
+                                        <CloudFileAttachment
+                                          url={sub.file_url}
+                                          fileName={sub.file_name}
+                                          fileType={sub.file_type}
+                                          showPreview={false}
+                                          linkLabel={
+                                            <>
+                                              <FileText className="w-3.5 h-3.5" />
+                                              {sub.file_name || 'Lihat / Unduh File Tugas'}
+                                            </>
+                                          }
                                           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#1D4ED8] bg-blue-50 hover:bg-blue-100 rounded-lg"
-                                        >
-                                          <FileText className="w-3.5 h-3.5" />
-                                          {sub.file_name || 'Lihat File Tugas'}
-                                        </a>
+                                        />
                                       )}
                                     </div>
 
@@ -2410,11 +2458,8 @@ export function AdminSection({
                     </p>
                   </div>
                   <div className="lg:col-span-6 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[16/10] lg:aspect-auto lg:min-h-[180px]">
-                    <img
-                      src={
-                        heroPreviewUrl ||
-                        (siteBranding.heroImageUrl ? resolveMediaUrl(siteBranding.heroImageUrl) : HERO_IMAGE)
-                      }
+                    <CloudImage
+                      src={heroPreviewUrl || siteBranding.heroImageUrl || HERO_IMAGE}
                       alt="Pratinjau Hero Beranda"
                       className="w-full h-full object-cover"
                     />

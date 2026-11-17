@@ -77,7 +77,7 @@ const DEFAULT_BRANDING: SiteBranding = {
 };
 
 export default function App() {
-  const { firebaseUser, firebaseAuthReady, isFirebaseAdmin, signOutGoogle } = useFirebase();
+  const { firebaseUser, firebaseAuthReady, isFirebaseAdmin, cloudPhotoUrl, signOutGoogle } = useFirebase();
 
   const [activeTab, setActiveTab] = useState<MainTab>('beranda');
   const [selectedUsername, setSelectedUsername] = useState<string | null>(null);
@@ -451,6 +451,12 @@ export default function App() {
       return {
         ...currentUser,
         role: isFirebaseAdmin ? 'admin' : currentUser.role,
+        avatar_url:
+          currentUser.avatar_url ||
+          (cloudPhotoUrl.startsWith('cloudfile://') || cloudPhotoUrl.startsWith('/uploads/')
+            ? cloudPhotoUrl
+            : '') ||
+          '',
         lms_points: firebaseUser && cloudLmsTasks !== null ? cloudPoints : currentUser.lms_points,
       };
     }
@@ -467,7 +473,7 @@ export default function App() {
         return {
           ...matched,
           role: isFirebaseAdmin ? 'admin' : matched.role,
-          avatar_url: matched.avatar_url || firebaseUser.photoURL || '',
+          avatar_url: matched.avatar_url || cloudPhotoUrl || firebaseUser.photoURL || '',
           lms_points: cloudLmsTasks !== null ? cloudPoints : matched.lms_points,
         };
       }
@@ -484,14 +490,14 @@ export default function App() {
         nfc_uid: '',
         qr_code_token: `NMC-FB-${firebaseUser.uid.slice(0, 8).toUpperCase()}`,
         avatar_color: isFirebaseAdmin ? '#B91C1C' : '#1D4ED8',
-        avatar_url: firebaseUser.photoURL || '',
+        avatar_url: cloudPhotoUrl || firebaseUser.photoURL || '',
         show_in_members: 0,
         created_at: new Date().toISOString(),
         lms_points: cloudPoints,
       };
     }
     return null;
-  }, [currentUser, firebaseUser, isFirebaseAdmin, members, lmsTasks, cloudLmsTasks]);
+  }, [currentUser, firebaseUser, isFirebaseAdmin, cloudPhotoUrl, members, lmsTasks, cloudLmsTasks]);
 
   const effectiveIsAdmin = effectiveUser?.role === 'admin' || isFirebaseAdmin;
 

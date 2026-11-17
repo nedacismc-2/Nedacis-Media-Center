@@ -15,8 +15,10 @@ interface FirebaseContextValue {
   firebaseAuthReady: boolean;
   firebaseOnline: boolean;
   isFirebaseAdmin: boolean;
+  cloudPhotoUrl: string;
   signInWithGoogle: () => Promise<FirebaseUser>;
   signOutGoogle: () => Promise<void>;
+  updateCloudUserPhoto: (photoUrl: string) => Promise<void>;
 }
 
 const FirebaseContext = createContext<FirebaseContextValue | null>(null);
@@ -26,6 +28,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const [firebaseAuthReady, setFirebaseAuthReady] = useState(false);
   const [firebaseOnline, setFirebaseOnline] = useState(true);
   const [isFirebaseAdmin, setIsFirebaseAdmin] = useState(false);
+  const [cloudPhotoUrl, setCloudPhotoUrl] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -42,6 +45,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       setFirebaseUser(user);
       if (!user) {
         setIsFirebaseAdmin(false);
+        setCloudPhotoUrl('');
         setFirebaseAuthReady(true);
         return;
       }
@@ -66,23 +70,30 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         const userSnap = await getDoc(userRef);
         const safeName = (user.displayName || user.email?.split('@')[0] || 'Pengguna NMC').slice(0, 120);
         const safeEmail = (user.email || '').slice(0, 160);
-        const safePhoto = (user.photoURL || '').slice(0, 500);
+        const safeGooglePhoto = (user.photoURL || '').slice(0, 500);
 
         if (!userSnap.exists()) {
           await setDoc(userRef, {
             uid: user.uid,
             email: safeEmail,
             displayName: safeName,
-            photoURL: safePhoto,
+            photoURL: safeGooglePhoto,
             role: adminStatus ? 'admin' : 'member',
             linkedMemberId: '',
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
+          setCloudPhotoUrl(safeGooglePhoto);
         } else {
+          const existingPhoto = String(userSnap.data().photoURL || '');
+          const effectivePhoto =
+            existingPhoto.startsWith('cloudfile://') || existingPhoto.startsWith('/uploads/')
+              ? existingPhoto
+              : safeGooglePhoto;
+          setCloudPhotoUrl(effectivePhoto || existingPhoto);
           await updateDoc(userRef, {
             displayName: safeName,
-            photoURL: safePhoto,
+            photoURL: effectivePhoto.slice(0, 500),
             updatedAt: serverTimestamp(),
           });
         }
@@ -111,6 +122,21 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     await signOut(auth);
   };
 
+  const updateCloudUserPhoto = async (photoUrl: string) => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    const cleanUrl = photoUrl.trim().slice(0, 500);
+    setCloudPhotoUrl(cleanUrl);
+    try {
+      await updateDoc(doc(db, 'users', uid), {
+        photoURL: cleanUrl,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
+    }
+  };
+
   return (
     <FirebaseContext.Provider
       value={{
@@ -118,8 +144,10 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         firebaseAuthReady,
         firebaseOnline,
         isFirebaseAdmin,
+        cloudPhotoUrl,
         signInWithGoogle,
         signOutGoogle,
+        updateCloudUserPhoto,
       }}
     >
       {children}

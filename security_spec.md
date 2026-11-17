@@ -1,13 +1,13 @@
-# Security Specification — MMC SMPN 2 Ciamis Firestore
+# Security Specification — NMC SMPN 2 Ciamis Firestore
 
 ## 1. Data Invariants
 1. **Strict Admin Gate**: Only verified admins (`/admins/{uid}` or verified bootstrap email `NedacisMC@gmail.com`) may modify `/site_settings/*`, `/news_articles/*`, `/schedules/*`, `/members_public/*`, `/members_private/*`, `/attendance_records/*`, `/lms_tasks/*`, `/blocked_words/*`, or approve/reject `/works/*` and `/lms_task_submissions/*`.
 2. **PII Isolation**: Private identifiers (`nis`, `nfcUid`, `email`, `ownerUid`) live strictly in `/members_private/{memberId}` and `/users/{userId}` and are unreadable by unauthenticated visitors or other students. Public member cards (`/members_public/{memberId}`) never store PII.
-3. **Authorship & Identity Integrity**: On document creation, user-authored entities (`/works`, `/works/{workId}/comments`, `/works/{workId}/likes`, `/lms_task_progress`, `/lms_task_submissions`) MUST bind `authorUid`/`userUid == request.auth.uid` and require `request.auth.token.email_verified == true`.
+3. **Authorship & Identity Integrity**: On document creation, user-authored entities (`/works`, `/works/{workId}/comments`, `/works/{workId}/likes`, `/lms_task_progress`, `/lms_task_submissions`, `/uploaded_files`, `/uploaded_files/{fileId}/chunks`) MUST bind `authorUid`/`userUid`/`uploaderUid == request.auth.uid` and require `request.auth.token.email_verified == true`.
 4. **Anti-Self-Escalation**: Standard users creating or updating `/users/{userId}` cannot set `role: 'admin'` and cannot write to `/admins/{adminId}`.
 5. **Moderation & Terminal State Locking**: Non-admin users creating a `/works` item must submit `approvalStatus == 'pending'` with zero counters (`likesCount == 0`, `commentsCount == 0`, `sharesCount == 0`). Non-admin users submitting `/lms_task_submissions` must submit `status == 'submitted'` with `pointsAwarded == 0`, and cannot modify a submission once `status == 'approved'`.
-6. **Temporal Integrity & Immutability**: Creation timestamps equal `request.time`; update timestamps equal `request.time`; immutable owner/creation fields (`authorUid`, `userUid`, `createdAt`, `taskId`, `workId`) cannot be altered on update.
-7. **Master Gate & Bounded Payloads**: Subcollections (`/works/{workId}/comments`, `/works/{workId}/likes`, `/lms_tasks/{taskId}/stages`) verify parent existence/status via `get()`/`exists()`, and every string/list/ID enforces strict size and regex bounds.
+6. **Temporal Integrity & Immutability**: Creation timestamps equal `request.time`; update timestamps equal `request.time`; immutable owner/creation fields (`authorUid`, `userUid`, `uploaderUid`, `createdAt`, `taskId`, `workId`, `fileId`) cannot be altered on update.
+7. **Master Gate & Bounded Payloads**: Subcollections (`/works/{workId}/comments`, `/works/{workId}/likes`, `/lms_tasks/{taskId}/stages`, `/uploaded_files/{fileId}/chunks`) verify parent existence/status/ownership via `get()`/`exists()`, and every string/list/ID enforces strict size and regex bounds.
 
 ## 2. "Dirty Dozen" Attack Payloads (All Must Return PERMISSION_DENIED)
 1. **Self-Admin Registration**: Signed-in student creates `/users/{uid}` with `role: "admin"`.

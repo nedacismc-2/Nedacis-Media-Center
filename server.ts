@@ -1580,7 +1580,7 @@ app.post('/api/admin/social-links', requireAdmin, (req, res) => {
         platform,
         label: String(item.label || platform).trim().slice(0, 40) || platform,
         url: safeUrl,
-        customIconUrl: item.customIconUrl ? String(item.customIconUrl).trim().slice(0, 300) : '',
+        customIconUrl: item.customIconUrl ? String(item.customIconUrl).trim().slice(0, 500) : '',
       };
     });
 

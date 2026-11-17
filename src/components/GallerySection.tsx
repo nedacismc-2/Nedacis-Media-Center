@@ -16,6 +16,8 @@ import {
 import type { StudentProfile, StudentWork, WorkComment } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
+import { uploadFileToCloud } from '../lib/cloudFiles';
+import { useFirebase } from '../context/FirebaseContext';
 import {
   addWorkCommentInFirestore,
   createWorkInFirestore,
@@ -27,7 +29,8 @@ import {
   toggleWorkCommentsInFirestore,
   toggleWorkLikeInFirestore,
 } from '../lib/firestoreSync';
-import { formatTimeAgo, getInitials, resolveMediaUrl } from '../lib/mediaAssets';
+import { formatTimeAgo, getInitials } from '../lib/mediaAssets';
+import { CloudImage, CloudVideo } from './CloudMedia';
 
 interface GallerySectionProps {
   works: StudentWork[];
@@ -56,8 +59,10 @@ export function GallerySection({
   onWorkPatch,
   onToast,
 }: GallerySectionProps) {
+  const { firebaseUser, signInWithGoogle } = useFirebase();
   const [filter, setFilter] = useState('Semua');
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
 
   // Upload state
   const [title, setTitle] = useState('');
@@ -125,40 +130,31 @@ export function GallerySection({
       let createdWork: StudentWork | null = null;
       let pendingApproval = currentUser.role !== 'admin';
 
-      if (file && getStoredToken()) {
-        const formData = new FormData();
-        formData.append('title', title.trim());
-        formData.append('category', category);
-        formData.append('description', description.trim());
-        formData.append('media', file);
+      if (file) {
+        resolvedMediaType = file.type.startsWith('video/') ? 'video' : 'image';
+        if (auth.currentUser) {
+          const uploaded = await uploadFileToCloud(file, { isPublic: true });
+          resolvedMediaUrl = uploaded.cloudUrl;
+        } else if (getStoredToken()) {
+          const formData = new FormData();
+          formData.append('title', title.trim());
+          formData.append('category', category);
+          formData.append('description', description.trim());
+          formData.append('media', file);
 
-        const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
-          method: 'POST',
-          body: formData,
-        });
-        createdWork = res.work;
-        resolvedMediaUrl = res.work.media_url;
-        resolvedMediaType = res.work.media_type;
-        pendingApproval = Boolean(res.pendingApproval);
-      } else if (file && !cleanUrl) {
-        if (auth.currentUser && !getStoredToken()) {
+          const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
+            method: 'POST',
+            body: formData,
+          });
+          createdWork = res.work;
+          resolvedMediaUrl = res.work.media_url;
+          resolvedMediaType = res.work.media_type;
+          pendingApproval = Boolean(res.pendingApproval);
+        } else {
           throw new Error(
-            'Untuk mengunggah file langsung dari perangkat, masuk juga dengan Akun Portal atau masukkan Tautan URL gambar/video.'
+            'Hubungkan akun Google terlebih dahulu untuk mengunggah file agar tersimpan & tampil di semua perangkat.'
           );
         }
-        const formData = new FormData();
-        formData.append('title', title.trim());
-        formData.append('category', category);
-        formData.append('description', description.trim());
-        formData.append('media', file);
-        const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
-          method: 'POST',
-          body: formData,
-        });
-        createdWork = res.work;
-        resolvedMediaUrl = res.work.media_url;
-        resolvedMediaType = res.work.media_type;
-        pendingApproval = Boolean(res.pendingApproval);
       }
 
       if (auth.currentUser && resolvedMediaUrl) {
@@ -176,32 +172,40 @@ export function GallerySection({
           authorAvatarUrl: currentUser.avatar_url || '',
           isAdminUploader: currentUser.role === 'admin',
         });
-        if (!createdWork) {
-          createdWork = {
-            id: Date.now(),
-            firestoreId: fId,
-            authorUid: auth.currentUser.uid,
-            user_id: currentUser.id,
-            author_name: currentUser.full_name,
-            author_username: currentUser.username,
-            author_kelas: currentUser.kelas,
-            author_division: currentUser.division,
-            author_avatar_color: currentUser.avatar_color,
-            author_avatar_url: currentUser.avatar_url,
-            title: title.trim(),
-            description: description.trim(),
-            category,
-            media_type: resolvedMediaType,
-            media_url: resolvedMediaUrl,
-            shares_count: 0,
-            comments_disabled: 0,
-            approval_status: currentUser.role === 'admin' ? 'approved' : 'pending',
-            created_at: new Date().toISOString(),
-            likes_count: 0,
-            comments_count: 0,
-            liked_by_me: false,
-            comments: [],
-          };
+
+        createdWork = {
+          id: Date.now(),
+          firestoreId: fId,
+          authorUid: auth.currentUser.uid,
+          user_id: currentUser.id,
+          author_name: currentUser.full_name,
+          author_username: currentUser.username,
+          author_kelas: currentUser.kelas,
+          author_division: currentUser.division,
+          author_avatar_color: currentUser.avatar_color,
+          author_avatar_url: currentUser.avatar_url,
+          title: title.trim(),
+          description: description.trim(),
+          category,
+          media_type: resolvedMediaType,
+          media_url: resolvedMediaUrl,
+          shares_count: 0,
+          comments_disabled: 0,
+          approval_status: currentUser.role === 'admin' ? 'approved' : 'pending',
+          created_at: new Date().toISOString(),
+          likes_count: 0,
+          comments_count: 0,
+          liked_by_me: false,
+          comments: [],
+        };
+
+        if (getStoredToken()) {
+          const mirrorForm = new FormData();
+          mirrorForm.append('title', title.trim());
+          mirrorForm.append('category', category);
+          mirrorForm.append('description', description.trim());
+          if (file) mirrorForm.append('media', file);
+          void apiFetch('/api/works', { method: 'POST', body: mirrorForm }).catch(() => {});
         }
       }
 
@@ -439,16 +443,16 @@ export function GallerySection({
                   className="relative aspect-[4/3] bg-slate-100 overflow-hidden cursor-pointer group"
                 >
                   {work.media_type === 'video' ? (
-                    <video
-                      src={resolveMediaUrl(work.media_url)}
+                    <CloudVideo
+                      src={work.media_url}
                       controls
                       preload="metadata"
                       className="w-full h-full object-cover"
                       onClick={(e) => e.stopPropagation()}
                     />
                   ) : (
-                    <img
-                      src={resolveMediaUrl(work.media_url)}
+                    <CloudImage
+                      src={work.media_url}
                       alt={work.title}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
@@ -487,8 +491,8 @@ export function GallerySection({
                     className="pt-1 inline-flex items-center gap-2 text-left group"
                   >
                     {work.author_avatar_url ? (
-                      <img
-                        src={resolveMediaUrl(work.author_avatar_url)}
+                      <CloudImage
+                        src={work.author_avatar_url}
                         alt={work.author_name}
                         className="w-7 h-7 rounded-full object-cover border border-slate-200 shrink-0"
                       />
@@ -586,6 +590,32 @@ export function GallerySection({
             </div>
 
             <form onSubmit={handleUploadSubmit} className="p-6 space-y-4">
+              {!firebaseUser && (
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <p className="text-xs text-amber-900 leading-relaxed">
+                    Hubungkan akun Google agar file foto/video tersimpan ke Cloud &amp; tampil di semua perangkat.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={connectingGoogle}
+                    onClick={async () => {
+                      setConnectingGoogle(true);
+                      try {
+                        await signInWithGoogle();
+                        onToast('Akun Google terhubung! File akan otomatis tersimpan ke Cloud.', 'success');
+                      } catch (err) {
+                        onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google.', 'error');
+                      } finally {
+                        setConnectingGoogle(false);
+                      }
+                    }}
+                    className="px-3 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-lg whitespace-nowrap shrink-0"
+                  >
+                    {connectingGoogle ? 'Menghubungkan...' : 'Hubungkan Google'}
+                  </button>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1.5">Judul Karya</label>
                 <input
@@ -625,7 +655,7 @@ export function GallerySection({
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                  Pilih File Media (Gambar JPG/PNG/WebP atau Video MP4/WebM, maks 50MB)
+                  Pilih File Media (Gambar JPG/PNG/WebP atau Video MP4/WebM, maks 15MB)
                 </label>
                 <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
                   <div className="flex items-center gap-3 text-slate-500">
@@ -720,15 +750,15 @@ export function GallerySection({
             {/* Left Media Viewport */}
             <div className="lg:col-span-7 bg-slate-950 flex items-center justify-center min-h-[260px] lg:min-h-[540px] max-h-[50vh] lg:max-h-[92vh]">
               {selectedWork.media_type === 'video' ? (
-                <video
-                  src={resolveMediaUrl(selectedWork.media_url)}
+                <CloudVideo
+                  src={selectedWork.media_url}
                   controls
                   autoPlay
                   className="w-full h-full max-h-[85vh] object-contain"
                 />
               ) : (
-                <img
-                  src={resolveMediaUrl(selectedWork.media_url)}
+                <CloudImage
+                  src={selectedWork.media_url}
                   alt={selectedWork.title}
                   referrerPolicy="no-referrer"
                   className="w-full h-full max-h-[85vh] object-contain"

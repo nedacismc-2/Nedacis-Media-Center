@@ -20,8 +20,11 @@ import {
 import type { AttendanceRecord, LmsTask, StudentProfile, StudentWork } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
+import { uploadFileToCloud } from '../lib/cloudFiles';
+import { useFirebase } from '../context/FirebaseContext';
 import { createWorkInFirestore, updateMemberAvatarInFirestore } from '../lib/firestoreSync';
-import { formatDateID, getInitials, getLocalTimeZoneLabel, resolveMediaUrl } from '../lib/mediaAssets';
+import { formatDateID, getInitials, getLocalTimeZoneLabel } from '../lib/mediaAssets';
+import { CloudImage, CloudVideo } from './CloudMedia';
 import { QrCodeDisplay } from './QrCodeDisplay';
 
 interface MembersSectionProps {
@@ -57,8 +60,10 @@ export function MembersSection({
   onToast,
   latestAttendanceEvent,
 }: MembersSectionProps) {
+  const { firebaseUser, isFirebaseAdmin, signInWithGoogle, updateCloudUserPhoto } = useFirebase();
   const [division, setDivision] = useState('Semua');
   const [query, setQuery] = useState('');
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
 
   // Selected profile data
   const [profileDetail, setProfileDetail] = useState<{
@@ -166,7 +171,31 @@ export function MembersSection({
     setUploadingAvatar(true);
     try {
       let updatedUser: StudentProfile | null = null;
-      if (getStoredToken()) {
+      if (auth.currentUser) {
+        const uploaded = await uploadFileToCloud(file, { isPublic: true, maxDimension: 600 });
+        await updateCloudUserPhoto(uploaded.cloudUrl);
+
+        const canUpdateMemberDoc = Boolean(
+          profileDetail?.member.firestoreId &&
+            (isFirebaseAdmin || profileDetail.member.owner_uid === auth.currentUser.uid)
+        );
+        if (canUpdateMemberDoc && profileDetail?.member.firestoreId) {
+          await updateMemberAvatarInFirestore(profileDetail.member.firestoreId, uploaded.cloudUrl).catch(
+            () => {}
+          );
+        }
+
+        if (getStoredToken()) {
+          const formData = new FormData();
+          formData.append('avatar', file);
+          void apiFetch('/api/profile/avatar', { method: 'POST', body: formData }).catch(() => {});
+        }
+
+        const baseUser = currentUser || profileDetail?.member;
+        if (baseUser) {
+          updatedUser = { ...baseUser, avatar_url: uploaded.cloudUrl };
+        }
+      } else if (getStoredToken()) {
         const formData = new FormData();
         formData.append('avatar', file);
         const res = await apiFetch<{ user: StudentProfile }>('/api/profile/avatar', {
@@ -175,15 +204,15 @@ export function MembersSection({
         });
         updatedUser = res.user;
       }
-      if (auth.currentUser && profileDetail?.member.firestoreId && updatedUser?.avatar_url) {
-        await updateMemberAvatarInFirestore(profileDetail.member.firestoreId, updatedUser.avatar_url);
-      }
+
       if (!updatedUser) {
-        throw new Error('Masuk dengan Akun Portal terlebih dahulu untuk mengunggah foto profil.');
+        throw new Error(
+          'Hubungkan akun Google terlebih dahulu agar foto profil dapat diunggah dan tersinkron di semua perangkat.'
+        );
       }
       setProfileDetail((prev) => (prev ? { ...prev, member: updatedUser! } : prev));
       onUserUpdated(updatedUser);
-      onToast('Foto profil berhasil diperbarui.', 'success');
+      onToast('Foto profil berhasil diperbarui dan disinkronkan.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memperbarui foto profil.', 'error');
     } finally {
@@ -205,24 +234,18 @@ export function MembersSection({
     }
     setUploadingWork(true);
     try {
-      const formData = new FormData();
-      formData.append('title', workTitle.trim());
-      formData.append('category', workCategory);
-      formData.append('description', workDesc.trim());
-      formData.append('media', workFile);
-
-      const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
-        method: 'POST',
-        body: formData,
-      });
+      let createdWork: StudentWork | null = null;
+      let pendingApproval = currentUser?.role !== 'admin';
 
       if (auth.currentUser && currentUser) {
-        await createWorkInFirestore({
+        const uploaded = await uploadFileToCloud(workFile, { isPublic: true });
+        const mediaType: 'image' | 'video' = workFile.type.startsWith('video/') ? 'video' : 'image';
+        const fId = await createWorkInFirestore({
           title: workTitle.trim(),
           description: workDesc.trim(),
           category: workCategory,
-          mediaType: res.work.media_type,
-          mediaUrl: res.work.media_url,
+          mediaType,
+          mediaUrl: uploaded.cloudUrl,
           authorName: currentUser.full_name,
           authorUsername: currentUser.username,
           authorKelas: currentUser.kelas,
@@ -230,19 +253,74 @@ export function MembersSection({
           authorAvatarColor: currentUser.avatar_color,
           authorAvatarUrl: currentUser.avatar_url || '',
           isAdminUploader: currentUser.role === 'admin',
-        }).catch(() => {});
+        });
+
+        pendingApproval = currentUser.role !== 'admin';
+        createdWork = {
+          id: Date.now(),
+          firestoreId: fId,
+          authorUid: auth.currentUser.uid,
+          user_id: currentUser.id,
+          author_name: currentUser.full_name,
+          author_username: currentUser.username,
+          author_kelas: currentUser.kelas,
+          author_division: currentUser.division,
+          author_avatar_color: currentUser.avatar_color,
+          author_avatar_url: currentUser.avatar_url,
+          title: workTitle.trim(),
+          description: workDesc.trim(),
+          category: workCategory,
+          media_type: mediaType,
+          media_url: uploaded.cloudUrl,
+          shares_count: 0,
+          comments_disabled: 0,
+          approval_status: pendingApproval ? 'pending' : 'approved',
+          created_at: new Date().toISOString(),
+          likes_count: 0,
+          comments_count: 0,
+          liked_by_me: false,
+          comments: [],
+        };
+
+        if (getStoredToken()) {
+          const mirrorForm = new FormData();
+          mirrorForm.append('title', workTitle.trim());
+          mirrorForm.append('category', workCategory);
+          mirrorForm.append('description', workDesc.trim());
+          mirrorForm.append('media', workFile);
+          void apiFetch('/api/works', { method: 'POST', body: mirrorForm }).catch(() => {});
+        }
+      } else if (getStoredToken()) {
+        const formData = new FormData();
+        formData.append('title', workTitle.trim());
+        formData.append('category', workCategory);
+        formData.append('description', workDesc.trim());
+        formData.append('media', workFile);
+
+        const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
+          method: 'POST',
+          body: formData,
+        });
+        createdWork = res.work;
+        pendingApproval = Boolean(res.pendingApproval);
+      } else {
+        throw new Error(
+          'Hubungkan akun Google terlebih dahulu untuk mengunggah karya agar tersinkron ke semua perangkat.'
+        );
       }
 
-      setProfileDetail((prev) => (prev ? { ...prev, works: [res.work, ...prev.works] } : prev));
-      if (!res.pendingApproval) {
-        onWorkApprovedOrAdminCreated(res.work);
+      if (createdWork) {
+        setProfileDetail((prev) => (prev ? { ...prev, works: [createdWork!, ...prev.works] } : prev));
+        if (!pendingApproval) {
+          onWorkApprovedOrAdminCreated(createdWork);
+        }
       }
       setShowWorkModal(false);
       setWorkTitle('');
       setWorkDesc('');
       handleWorkFileChange(null);
       onToast(
-        res.pendingApproval
+        pendingApproval
           ? 'Karya berhasil diunggah! Menunggu peninjauan dan persetujuan Admin sebelum terposting di Beranda.'
           : 'Karya berhasil diterbitkan ke Beranda dan Galeri.',
         'success'
@@ -305,8 +383,8 @@ export function MembersSection({
               <div className="flex flex-col sm:flex-row sm:items-center gap-5">
                 <div className="relative w-20 h-20 shrink-0">
                   {member.avatar_url ? (
-                    <img
-                      src={resolveMediaUrl(member.avatar_url)}
+                    <CloudImage
+                      src={member.avatar_url}
                       alt={member.full_name}
                       className="w-20 h-20 rounded-2xl object-cover border border-slate-200"
                     />
@@ -625,10 +703,10 @@ export function MembersSection({
                   >
                     <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
                       {work.media_type === 'video' ? (
-                        <video src={resolveMediaUrl(work.media_url)} className="w-full h-full object-cover" muted />
+                        <CloudVideo src={work.media_url} className="w-full h-full object-cover" muted />
                       ) : (
-                        <img
-                          src={resolveMediaUrl(work.media_url)}
+                        <CloudImage
+                          src={work.media_url}
                           alt={work.title}
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
@@ -687,6 +765,32 @@ export function MembersSection({
               </div>
 
               <form onSubmit={handleProfileWorkUpload} className="p-6 space-y-4">
+                {!firebaseUser && (
+                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <p className="text-xs text-amber-900 leading-relaxed">
+                      Hubungkan akun Google agar file foto/video tersimpan ke Cloud &amp; tampil di semua perangkat.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={connectingGoogle}
+                      onClick={async () => {
+                        setConnectingGoogle(true);
+                        try {
+                          await signInWithGoogle();
+                          onToast('Akun Google terhubung! File akan otomatis tersimpan ke Cloud.', 'success');
+                        } catch (err) {
+                          onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google.', 'error');
+                        } finally {
+                          setConnectingGoogle(false);
+                        }
+                      }}
+                      className="px-3 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-lg whitespace-nowrap shrink-0"
+                    >
+                      {connectingGoogle ? 'Menghubungkan...' : 'Hubungkan Google'}
+                    </button>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">Judul Karya</label>
                   <input
@@ -726,7 +830,7 @@ export function MembersSection({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                    Pilih File Foto atau Video (maks 50MB)
+                    Pilih File Foto atau Video (maks 15MB)
                   </label>
                   <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-5 cursor-pointer hover:bg-slate-50 transition-colors">
                     <div className="flex items-center gap-3 text-slate-500">
@@ -851,8 +955,8 @@ export function MembersSection({
           >
             <div className="flex items-start gap-4">
               {member.avatar_url ? (
-                <img
-                  src={resolveMediaUrl(member.avatar_url)}
+                <CloudImage
+                  src={member.avatar_url}
                   alt={member.full_name}
                   className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0"
                 />

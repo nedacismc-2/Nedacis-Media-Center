@@ -1,5 +1,5 @@
 import type { SocialPlatform } from '../types';
-import { resolveMediaUrl } from '../lib/mediaAssets';
+import { CloudImage } from './CloudMedia';
 
 interface SocialSilhouetteIconProps {
   platform: SocialPlatform;
@@ -18,8 +18,8 @@ export function SocialSilhouetteIcon({
 }: SocialSilhouetteIconProps) {
   if (customIconUrl) {
     return (
-      <img
-        src={resolveMediaUrl(customIconUrl)}
+      <CloudImage
+        src={customIconUrl}
         alt={label || platform}
         className={`${className} object-contain ${
           tone === 'light' ? 'brightness-0 invert' : 'brightness-0'
