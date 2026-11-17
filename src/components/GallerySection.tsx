@@ -17,13 +17,13 @@ import type { StudentProfile, StudentWork, WorkComment } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
 import { uploadFileToCloud } from '../lib/cloudFiles';
-import { useFirebase } from '../context/FirebaseContext';
 import {
   addWorkCommentInFirestore,
   createWorkInFirestore,
   deleteWorkCommentInFirestore,
   deleteWorkInFirestore,
   fetchWorkLikedByUser,
+  sanitizeDocId,
   shareWorkInFirestore,
   subscribeWorkComments,
   toggleWorkCommentsInFirestore,
@@ -59,10 +59,15 @@ export function GallerySection({
   onWorkPatch,
   onToast,
 }: GallerySectionProps) {
-  const { firebaseUser, signInWithGoogle } = useFirebase();
   const [filter, setFilter] = useState('Semua');
   const [showUploadModal, setShowUploadModal] = useState(false);
-  const [connectingGoogle, setConnectingGoogle] = useState(false);
+
+  const memberDocId = currentUser?.firestoreId?.startsWith('member_')
+    ? currentUser.firestoreId
+    : currentUser?.username
+    ? sanitizeDocId(`member_${currentUser.username}`)
+    : undefined;
+  const effectiveActorId = auth.currentUser?.uid || memberDocId;
 
   // Upload state
   const [title, setTitle] = useState('');
@@ -89,15 +94,15 @@ export function GallerySection({
     const unsub = subscribeWorkComments(fId, currentUser?.role === 'admin', (comments) => {
       setCloudComments(comments);
     });
-    if (auth.currentUser) {
-      fetchWorkLikedByUser(fId).then((liked) => {
+    if (effectiveActorId) {
+      fetchWorkLikedByUser(fId, memberDocId).then((liked) => {
         if (liked && !selectedWork.liked_by_me) {
           onWorkPatch(selectedWork.id, { liked_by_me: true });
         }
       });
     }
     return () => unsub();
-  }, [selectedWork?.firestoreId, selectedWork?.id, currentUser?.role]);
+  }, [selectedWork?.firestoreId, selectedWork?.id, currentUser?.role, effectiveActorId, memberDocId]);
 
   const filteredWorks = filter === 'Semua' ? works : works.filter((w) => w.category === filter);
 
@@ -132,32 +137,14 @@ export function GallerySection({
 
       if (file) {
         resolvedMediaType = file.type.startsWith('video/') ? 'video' : 'image';
-        if (auth.currentUser) {
-          const uploaded = await uploadFileToCloud(file, { isPublic: true });
-          resolvedMediaUrl = uploaded.cloudUrl;
-        } else if (getStoredToken()) {
-          const formData = new FormData();
-          formData.append('title', title.trim());
-          formData.append('category', category);
-          formData.append('description', description.trim());
-          formData.append('media', file);
-
-          const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
-            method: 'POST',
-            body: formData,
-          });
-          createdWork = res.work;
-          resolvedMediaUrl = res.work.media_url;
-          resolvedMediaType = res.work.media_type;
-          pendingApproval = Boolean(res.pendingApproval);
-        } else {
-          throw new Error(
-            'Hubungkan akun Google terlebih dahulu untuk mengunggah file agar tersimpan & tampil di semua perangkat.'
-          );
-        }
+        const uploaded = await uploadFileToCloud(file, {
+          isPublic: true,
+          uploaderMemberId: memberDocId,
+        });
+        resolvedMediaUrl = uploaded.cloudUrl;
       }
 
-      if (auth.currentUser && resolvedMediaUrl) {
+      if (resolvedMediaUrl) {
         const fId = await createWorkInFirestore({
           title: title.trim(),
           description: description.trim(),
@@ -166,6 +153,7 @@ export function GallerySection({
           mediaUrl: resolvedMediaUrl,
           authorName: currentUser.full_name,
           authorUsername: currentUser.username,
+          authorMemberId: memberDocId,
           authorKelas: currentUser.kelas,
           authorDivision: currentUser.division,
           authorAvatarColor: currentUser.avatar_color,
@@ -176,7 +164,7 @@ export function GallerySection({
         createdWork = {
           id: Date.now(),
           firestoreId: fId,
-          authorUid: auth.currentUser.uid,
+          authorUid: effectiveActorId || memberDocId,
           user_id: currentUser.id,
           author_name: currentUser.full_name,
           author_username: currentUser.username,
@@ -219,7 +207,7 @@ export function GallerySection({
       handleFileChange(null);
       onToast(
         pendingApproval
-          ? 'Karya berhasil dikirim! Menunggu peninjauan dan persetujuan Admin sebelum terposting di Beranda.'
+          ? 'Karya berhasil dikirim ke Firebase! Menunggu peninjauan Admin sebelum terposting di Beranda.'
           : 'Karya berhasil diterbitkan dan tersinkronisasi di Beranda & Galeri.',
         'success'
       );
@@ -236,8 +224,8 @@ export function GallerySection({
       return;
     }
     try {
-      if (auth.currentUser && work.firestoreId) {
-        const liked = await toggleWorkLikeInFirestore(work.firestoreId, work.likes_count);
+      if (work.firestoreId) {
+        const liked = await toggleWorkLikeInFirestore(work.firestoreId, work.likes_count, memberDocId);
         const nextCount = liked ? work.likes_count + 1 : Math.max(0, work.likes_count - 1);
         onWorkPatch(work.id, { liked_by_me: liked, likes_count: nextCount });
       }
@@ -266,8 +254,8 @@ export function GallerySection({
       } else if (navigator.clipboard) {
         await navigator.clipboard.writeText(shareUrl);
       }
-      if (auth.currentUser && work.firestoreId) {
-        await shareWorkInFirestore(work.firestoreId, work.shares_count);
+      if (work.firestoreId && effectiveActorId) {
+        await shareWorkInFirestore(work.firestoreId, work.shares_count, effectiveActorId);
         onWorkPatch(work.id, { shares_count: work.shares_count + 1 });
       }
       if (getStoredToken()) {
@@ -296,12 +284,13 @@ export function GallerySection({
     setSubmittingComment(true);
     setCommentError(null);
     try {
-      if (auth.currentUser && selectedWork.firestoreId) {
+      if (selectedWork.firestoreId) {
         const createdComment = await addWorkCommentInFirestore({
           workId: selectedWork.firestoreId,
           currentCommentsCount: selectedWork.comments_count,
           authorName: currentUser.full_name,
           authorUsername: currentUser.username,
+          authorMemberId: memberDocId,
           authorKelas: currentUser.kelas,
           authorRole: currentUser.role,
           content: commentText.trim(),
@@ -313,7 +302,7 @@ export function GallerySection({
           method: 'POST',
           body: JSON.stringify({ content: commentText.trim() }),
         }).catch((err) => {
-          if (!selectedWork.firestoreId || !auth.currentUser) throw err;
+          if (!selectedWork.firestoreId) throw err;
         });
       }
       setCommentText('');
@@ -327,7 +316,7 @@ export function GallerySection({
   const handleToggleComments = async (work: StudentWork) => {
     try {
       const nextDisabled = work.comments_disabled ? 0 : 1;
-      if (auth.currentUser && work.firestoreId) {
+      if (work.firestoreId) {
         await toggleWorkCommentsInFirestore(work.firestoreId, nextDisabled === 1);
       }
       if (getStoredToken()) {
@@ -347,7 +336,7 @@ export function GallerySection({
 
   const handleDeleteWork = async (work: StudentWork) => {
     try {
-      if (auth.currentUser && work.firestoreId) {
+      if (work.firestoreId) {
         await deleteWorkInFirestore(work.firestoreId);
       }
       if (getStoredToken()) {
@@ -363,7 +352,7 @@ export function GallerySection({
 
   const handleDeleteComment = async (comment: WorkComment) => {
     try {
-      if (auth.currentUser && selectedWork?.firestoreId && comment.firestoreId) {
+      if (selectedWork?.firestoreId && comment.firestoreId) {
         await deleteWorkCommentInFirestore(
           selectedWork.firestoreId,
           comment.firestoreId,
@@ -590,31 +579,6 @@ export function GallerySection({
             </div>
 
             <form onSubmit={handleUploadSubmit} className="p-6 space-y-4">
-              {!firebaseUser && (
-                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                  <p className="text-xs text-amber-900 leading-relaxed">
-                    Hubungkan akun Google agar file foto/video tersimpan ke Cloud &amp; tampil di semua perangkat.
-                  </p>
-                  <button
-                    type="button"
-                    disabled={connectingGoogle}
-                    onClick={async () => {
-                      setConnectingGoogle(true);
-                      try {
-                        await signInWithGoogle();
-                        onToast('Akun Google terhubung! File akan otomatis tersimpan ke Cloud.', 'success');
-                      } catch (err) {
-                        onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google.', 'error');
-                      } finally {
-                        setConnectingGoogle(false);
-                      }
-                    }}
-                    className="px-3 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-lg whitespace-nowrap shrink-0"
-                  >
-                    {connectingGoogle ? 'Menghubungkan...' : 'Hubungkan Google'}
-                  </button>
-                </div>
-              )}
 
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1.5">Judul Karya</label>

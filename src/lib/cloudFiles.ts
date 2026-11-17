@@ -1,9 +1,24 @@
-import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+  Timestamp,
+  writeBatch,
+  type Unsubscribe,
+} from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { resolveMediaUrl } from './mediaAssets';
 
 export const CLOUD_FILE_PREFIX = 'cloudfile://';
 export const MAX_CLOUD_FILE_BYTES = 15 * 1024 * 1024; // 15 MB raw binary limit
+// Safe Cloud Firestore media quota within Firebase Spark 1 GiB free database limit
+export const CLOUD_STORAGE_QUOTA_BYTES = 500 * 1024 * 1024; // 500 MB
+export const CLOUD_STORAGE_WARN_RATIO = 0.75; // 75% warning threshold
+export const CLOUD_STORAGE_FULL_RATIO = 0.9; // 90% full/critical threshold
 const CHUNK_BASE64_LENGTH = 440000; // Multiple of 4, safely below Firestore 1MB doc limit
 const CHUNK_BATCH_SIZE = 8;
 
@@ -24,8 +39,47 @@ export interface CloudUploadResult {
   sizeBytes: number;
 }
 
+export interface CloudUploadedFileRecord {
+  fileId: string;
+  uploaderUid: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  estimatedFirestoreBytes: number;
+  chunkCount: number;
+  isPublic: boolean;
+  createdAt: string;
+}
+
+export interface CloudStorageSummary {
+  files: CloudUploadedFileRecord[];
+  totalFiles: number;
+  totalRawBytes: number;
+  estimatedFirestoreBytes: number;
+  quotaBytes: number;
+  usagePercent: number;
+  status: 'ok' | 'warning' | 'full';
+}
+
 const resolvedCache = new Map<string, ResolvedCloudFile>();
 const inFlightReads = new Map<string, Promise<ResolvedCloudFile | null>>();
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+export function estimateFirestoreFileBytes(rawBytes: number): number {
+  const safeRaw = Math.max(0, Number(rawBytes) || 0);
+  return Math.ceil(safeRaw * 1.35) + 1024;
+}
+
+function sanitizeUploaderId(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+}
 
 export function isCloudFileUrl(url?: string | null): boolean {
   return Boolean(url && url.startsWith(CLOUD_FILE_PREFIX));
@@ -170,13 +224,13 @@ function base64ToUint8Array(b64: string): Uint8Array {
 
 export async function uploadFileToCloud(
   file: File,
-  options?: { isPublic?: boolean; maxDimension?: number; targetBytes?: number }
+  options?: { isPublic?: boolean; maxDimension?: number; targetBytes?: number; uploaderMemberId?: string }
 ): Promise<CloudUploadResult> {
-  const uid = auth.currentUser?.uid;
+  const uid =
+    auth.currentUser?.uid ||
+    (options?.uploaderMemberId ? sanitizeUploaderId(options.uploaderMemberId) : '');
   if (!uid) {
-    throw new Error(
-      'Hubungkan akun Google terlebih dahulu agar file dapat diunggah dan tersinkron di semua perangkat.'
-    );
+    throw new Error('Silakan masuk ke akun anggota terlebih dahulu untuk mengunggah file ke Firebase.');
   }
 
   const processed = await compressImageIfNeeded(file, {
@@ -189,13 +243,13 @@ export async function uploadFileToCloud(
   }
   if (processed.blob.size > MAX_CLOUD_FILE_BYTES) {
     throw new Error(
-      `Ukuran file (${(processed.blob.size / (1024 * 1024)).toFixed(1)} MB) melebihi batas maksimal 15 MB untuk sinkronisasi Cloud lintas perangkat.`
+      `Ukuran file (${(processed.blob.size / (1024 * 1024)).toFixed(1)} MB) melebihi batas maksimal 15 MB untuk sinkronisasi Firebase lintas perangkat.`
     );
   }
 
   const b64 = await blobToBase64(processed.blob);
   if (!b64) {
-    throw new Error('Gagal mengonversi file ke format penyimpanan Cloud.');
+    throw new Error('Gagal mengonversi file ke format penyimpanan Firebase.');
   }
 
   const chunks: string[] = [];
@@ -204,7 +258,7 @@ export async function uploadFileToCloud(
   }
 
   if (chunks.length > 60) {
-    throw new Error('Ukuran file terlalu besar untuk penyimpanan Cloud. Maksimal 15 MB per file.');
+    throw new Error('Ukuran file terlalu besar untuk penyimpanan Firebase. Maksimal 15 MB per file.');
   }
 
   const fileId = `file_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -254,6 +308,116 @@ export async function uploadFileToCloud(
     mimeType: processed.mimeType,
     sizeBytes: processed.blob.size,
   };
+}
+
+export function subscribeUploadedFilesAdmin(
+  onData: (summary: CloudStorageSummary) => void,
+  onError?: (err: unknown) => void
+): Unsubscribe {
+  return onSnapshot(
+    collection(db, 'uploaded_files'),
+    (snap) => {
+      let totalRawBytes = 0;
+      let estimatedFirestoreBytes = 0;
+
+      const files: CloudUploadedFileRecord[] = snap.docs.map((docSnap) => {
+        const d = docSnap.data();
+        const sizeBytes = Math.max(0, Number(d.sizeBytes || 0));
+        const estBytes = estimateFirestoreFileBytes(sizeBytes);
+        totalRawBytes += sizeBytes;
+        estimatedFirestoreBytes += estBytes;
+        const createdAt =
+          d.createdAt instanceof Timestamp
+            ? d.createdAt.toDate().toISOString()
+            : typeof d.createdAt === 'string' && d.createdAt
+            ? d.createdAt
+            : new Date().toISOString();
+
+        return {
+          fileId: String(d.fileId || docSnap.id),
+          uploaderUid: String(d.uploaderUid || ''),
+          fileName: String(d.fileName || 'file'),
+          mimeType: String(d.mimeType || 'application/octet-stream'),
+          sizeBytes,
+          estimatedFirestoreBytes: estBytes,
+          chunkCount: Number(d.chunkCount || 1),
+          isPublic: Boolean(d.isPublic),
+          createdAt,
+        };
+      });
+
+      files.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+      const ratio = estimatedFirestoreBytes / CLOUD_STORAGE_QUOTA_BYTES;
+      const usagePercent = Math.min(100, Math.round(ratio * 1000) / 10);
+      const status: CloudStorageSummary['status'] =
+        ratio >= CLOUD_STORAGE_FULL_RATIO
+          ? 'full'
+          : ratio >= CLOUD_STORAGE_WARN_RATIO
+          ? 'warning'
+          : 'ok';
+
+      onData({
+        files,
+        totalFiles: files.length,
+        totalRawBytes,
+        estimatedFirestoreBytes,
+        quotaBytes: CLOUD_STORAGE_QUOTA_BYTES,
+        usagePercent,
+        status,
+      });
+    },
+    (err) => {
+      onError?.(err);
+    }
+  );
+}
+
+export async function deleteUploadedFileFromCloud(fileId: string): Promise<void> {
+  const cleanId = sanitizeUploaderId(fileId);
+  if (!cleanId) return;
+
+  const chunksSnap = await getDocs(collection(db, 'uploaded_files', cleanId, 'chunks'));
+  const chunkRefs = chunksSnap.docs.map((d) => d.ref);
+
+  const DELETE_BATCH_LIMIT = 350;
+  for (let i = 0; i < chunkRefs.length; i += DELETE_BATCH_LIMIT) {
+    const batch = writeBatch(db);
+    const slice = chunkRefs.slice(i, i + DELETE_BATCH_LIMIT);
+    slice.forEach((ref) => batch.delete(ref));
+    if (i + DELETE_BATCH_LIMIT >= chunkRefs.length) {
+      batch.delete(doc(db, 'uploaded_files', cleanId));
+    }
+    await batch.commit();
+  }
+
+  if (chunkRefs.length === 0) {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'uploaded_files', cleanId));
+    await batch.commit();
+  }
+
+  const cached = resolvedCache.get(cleanId);
+  if (cached) {
+    URL.revokeObjectURL(cached.objectUrl);
+    resolvedCache.delete(cleanId);
+  }
+}
+
+export async function deleteMultipleUploadedFilesFromCloud(
+  fileIds: string[]
+): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+  for (const id of fileIds) {
+    try {
+      await deleteUploadedFileFromCloud(id);
+      deleted += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { deleted, failed };
 }
 
 export async function resolveCloudFile(url: string): Promise<ResolvedCloudFile | null> {

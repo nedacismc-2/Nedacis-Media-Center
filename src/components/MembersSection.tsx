@@ -22,7 +22,7 @@ import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
 import { uploadFileToCloud } from '../lib/cloudFiles';
 import { useFirebase } from '../context/FirebaseContext';
-import { createWorkInFirestore, updateMemberAvatarInFirestore } from '../lib/firestoreSync';
+import { createWorkInFirestore, sanitizeDocId, updateMemberAvatarInFirestore } from '../lib/firestoreSync';
 import { formatDateID, getInitials, getLocalTimeZoneLabel } from '../lib/mediaAssets';
 import { CloudImage, CloudVideo } from './CloudMedia';
 import { QrCodeDisplay } from './QrCodeDisplay';
@@ -60,10 +60,15 @@ export function MembersSection({
   onToast,
   latestAttendanceEvent,
 }: MembersSectionProps) {
-  const { firebaseUser, isFirebaseAdmin, signInWithGoogle, updateCloudUserPhoto } = useFirebase();
+  const { isFirebaseAdmin, updateCloudUserPhoto } = useFirebase();
   const [division, setDivision] = useState('Semua');
   const [query, setQuery] = useState('');
-  const [connectingGoogle, setConnectingGoogle] = useState(false);
+
+  const currentMemberDocId = currentUser?.firestoreId?.startsWith('member_')
+    ? currentUser.firestoreId
+    : currentUser?.username
+    ? sanitizeDocId(`member_${currentUser.username}`)
+    : undefined;
 
   // Selected profile data
   const [profileDetail, setProfileDetail] = useState<{
@@ -170,49 +175,38 @@ export function MembersSection({
 
     setUploadingAvatar(true);
     try {
-      let updatedUser: StudentProfile | null = null;
+      const targetMemberId = profileDetail?.member.firestoreId || currentMemberDocId;
+      const uploaded = await uploadFileToCloud(file, {
+        isPublic: true,
+        maxDimension: 600,
+        uploaderMemberId: currentMemberDocId,
+      });
+
       if (auth.currentUser) {
-        const uploaded = await uploadFileToCloud(file, { isPublic: true, maxDimension: 600 });
-        await updateCloudUserPhoto(uploaded.cloudUrl);
+        await updateCloudUserPhoto(uploaded.cloudUrl).catch(() => {});
+      }
 
-        const canUpdateMemberDoc = Boolean(
-          profileDetail?.member.firestoreId &&
-            (isFirebaseAdmin || profileDetail.member.owner_uid === auth.currentUser.uid)
-        );
-        if (canUpdateMemberDoc && profileDetail?.member.firestoreId) {
-          await updateMemberAvatarInFirestore(profileDetail.member.firestoreId, uploaded.cloudUrl).catch(
-            () => {}
-          );
-        }
+      if (targetMemberId && targetMemberId.startsWith('member_')) {
+        await updateMemberAvatarInFirestore(targetMemberId, uploaded.cloudUrl);
+      }
 
-        if (getStoredToken()) {
-          const formData = new FormData();
-          formData.append('avatar', file);
-          void apiFetch('/api/profile/avatar', { method: 'POST', body: formData }).catch(() => {});
-        }
-
-        const baseUser = currentUser || profileDetail?.member;
-        if (baseUser) {
-          updatedUser = { ...baseUser, avatar_url: uploaded.cloudUrl };
-        }
-      } else if (getStoredToken()) {
+      if (getStoredToken()) {
         const formData = new FormData();
         formData.append('avatar', file);
-        const res = await apiFetch<{ user: StudentProfile }>('/api/profile/avatar', {
-          method: 'POST',
-          body: formData,
-        });
-        updatedUser = res.user;
+        void apiFetch('/api/profile/avatar', { method: 'POST', body: formData }).catch(() => {});
       }
 
+      const baseUser = currentUser || profileDetail?.member;
+      const updatedUser: StudentProfile | null = baseUser
+        ? { ...baseUser, avatar_url: uploaded.cloudUrl }
+        : null;
+
       if (!updatedUser) {
-        throw new Error(
-          'Hubungkan akun Google terlebih dahulu agar foto profil dapat diunggah dan tersinkron di semua perangkat.'
-        );
+        throw new Error('Gagal memperbarui profil pengguna.');
       }
-      setProfileDetail((prev) => (prev ? { ...prev, member: updatedUser! } : prev));
+      setProfileDetail((prev) => (prev ? { ...prev, member: updatedUser } : prev));
       onUserUpdated(updatedUser);
-      onToast('Foto profil berhasil diperbarui dan disinkronkan.', 'success');
+      onToast('Foto profil berhasil diperbarui dan tersimpan di Firebase.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memperbarui foto profil.', 'error');
     } finally {
@@ -228,92 +222,76 @@ export function MembersSection({
 
   const handleProfileWorkUpload = async (e: FormEvent) => {
     e.preventDefault();
+    if (!currentUser) {
+      onToast('Silakan masuk ke akun Anda terlebih dahulu.', 'error');
+      return;
+    }
     if (!workFile || !workTitle.trim()) {
       onToast('Judul dan file foto/video karya wajib diisi.', 'error');
       return;
     }
     setUploadingWork(true);
     try {
-      let createdWork: StudentWork | null = null;
-      let pendingApproval = currentUser?.role !== 'admin';
+      const uploaded = await uploadFileToCloud(workFile, {
+        isPublic: true,
+        uploaderMemberId: currentMemberDocId,
+      });
+      const mediaType: 'image' | 'video' = workFile.type.startsWith('video/') ? 'video' : 'image';
+      const fId = await createWorkInFirestore({
+        title: workTitle.trim(),
+        description: workDesc.trim(),
+        category: workCategory,
+        mediaType,
+        mediaUrl: uploaded.cloudUrl,
+        authorName: currentUser.full_name,
+        authorUsername: currentUser.username,
+        authorMemberId: currentMemberDocId,
+        authorKelas: currentUser.kelas,
+        authorDivision: currentUser.division,
+        authorAvatarColor: currentUser.avatar_color,
+        authorAvatarUrl: currentUser.avatar_url || '',
+        isAdminUploader: currentUser.role === 'admin' || isFirebaseAdmin,
+      });
 
-      if (auth.currentUser && currentUser) {
-        const uploaded = await uploadFileToCloud(workFile, { isPublic: true });
-        const mediaType: 'image' | 'video' = workFile.type.startsWith('video/') ? 'video' : 'image';
-        const fId = await createWorkInFirestore({
-          title: workTitle.trim(),
-          description: workDesc.trim(),
-          category: workCategory,
-          mediaType,
-          mediaUrl: uploaded.cloudUrl,
-          authorName: currentUser.full_name,
-          authorUsername: currentUser.username,
-          authorKelas: currentUser.kelas,
-          authorDivision: currentUser.division,
-          authorAvatarColor: currentUser.avatar_color,
-          authorAvatarUrl: currentUser.avatar_url || '',
-          isAdminUploader: currentUser.role === 'admin',
-        });
+      const pendingApproval = !(currentUser.role === 'admin' || isFirebaseAdmin);
+      const createdWork: StudentWork = {
+        id: Date.now(),
+        firestoreId: fId,
+        authorUid: auth.currentUser?.uid || currentMemberDocId,
+        user_id: currentUser.id,
+        author_name: currentUser.full_name,
+        author_username: currentUser.username,
+        author_kelas: currentUser.kelas,
+        author_division: currentUser.division,
+        author_avatar_color: currentUser.avatar_color,
+        author_avatar_url: currentUser.avatar_url,
+        title: workTitle.trim(),
+        description: workDesc.trim(),
+        category: workCategory,
+        media_type: mediaType,
+        media_url: uploaded.cloudUrl,
+        shares_count: 0,
+        comments_disabled: 0,
+        approval_status: pendingApproval ? 'pending' : 'approved',
+        created_at: new Date().toISOString(),
+        likes_count: 0,
+        comments_count: 0,
+        liked_by_me: false,
+        comments: [],
+      };
 
-        pendingApproval = currentUser.role !== 'admin';
-        createdWork = {
-          id: Date.now(),
-          firestoreId: fId,
-          authorUid: auth.currentUser.uid,
-          user_id: currentUser.id,
-          author_name: currentUser.full_name,
-          author_username: currentUser.username,
-          author_kelas: currentUser.kelas,
-          author_division: currentUser.division,
-          author_avatar_color: currentUser.avatar_color,
-          author_avatar_url: currentUser.avatar_url,
-          title: workTitle.trim(),
-          description: workDesc.trim(),
-          category: workCategory,
-          media_type: mediaType,
-          media_url: uploaded.cloudUrl,
-          shares_count: 0,
-          comments_disabled: 0,
-          approval_status: pendingApproval ? 'pending' : 'approved',
-          created_at: new Date().toISOString(),
-          likes_count: 0,
-          comments_count: 0,
-          liked_by_me: false,
-          comments: [],
-        };
-
-        if (getStoredToken()) {
-          const mirrorForm = new FormData();
-          mirrorForm.append('title', workTitle.trim());
-          mirrorForm.append('category', workCategory);
-          mirrorForm.append('description', workDesc.trim());
-          mirrorForm.append('media', workFile);
-          void apiFetch('/api/works', { method: 'POST', body: mirrorForm }).catch(() => {});
-        }
-      } else if (getStoredToken()) {
-        const formData = new FormData();
-        formData.append('title', workTitle.trim());
-        formData.append('category', workCategory);
-        formData.append('description', workDesc.trim());
-        formData.append('media', workFile);
-
-        const res = await apiFetch<{ work: StudentWork; pendingApproval?: boolean }>('/api/works', {
-          method: 'POST',
-          body: formData,
-        });
-        createdWork = res.work;
-        pendingApproval = Boolean(res.pendingApproval);
-      } else {
-        throw new Error(
-          'Hubungkan akun Google terlebih dahulu untuk mengunggah karya agar tersinkron ke semua perangkat.'
-        );
+      if (getStoredToken()) {
+        const mirrorForm = new FormData();
+        mirrorForm.append('title', workTitle.trim());
+        mirrorForm.append('category', workCategory);
+        mirrorForm.append('description', workDesc.trim());
+        mirrorForm.append('media', workFile);
+        void apiFetch('/api/works', { method: 'POST', body: mirrorForm }).catch(() => {});
       }
 
-      if (createdWork) {
-        setProfileDetail((prev) => (prev ? { ...prev, works: [createdWork!, ...prev.works] } : prev));
-        if (!pendingApproval) {
-          onWorkApprovedOrAdminCreated(createdWork);
-        }
+      setProfileDetail((prev) => (prev ? { ...prev, works: [createdWork, ...prev.works] } : prev));
+      if (!pendingApproval) {
+        onWorkApprovedOrAdminCreated(createdWork);
       }
       setShowWorkModal(false);
       setWorkTitle('');
@@ -321,7 +299,7 @@ export function MembersSection({
       handleWorkFileChange(null);
       onToast(
         pendingApproval
-          ? 'Karya berhasil diunggah! Menunggu peninjauan dan persetujuan Admin sebelum terposting di Beranda.'
+          ? 'Karya berhasil dikirim ke Firebase! Menunggu peninjauan Admin sebelum terposting di Beranda.'
           : 'Karya berhasil diterbitkan ke Beranda dan Galeri.',
         'success'
       );
@@ -765,31 +743,6 @@ export function MembersSection({
               </div>
 
               <form onSubmit={handleProfileWorkUpload} className="p-6 space-y-4">
-                {!firebaseUser && (
-                  <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                    <p className="text-xs text-amber-900 leading-relaxed">
-                      Hubungkan akun Google agar file foto/video tersimpan ke Cloud &amp; tampil di semua perangkat.
-                    </p>
-                    <button
-                      type="button"
-                      disabled={connectingGoogle}
-                      onClick={async () => {
-                        setConnectingGoogle(true);
-                        try {
-                          await signInWithGoogle();
-                          onToast('Akun Google terhubung! File akan otomatis tersimpan ke Cloud.', 'success');
-                        } catch (err) {
-                          onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google.', 'error');
-                        } finally {
-                          setConnectingGoogle(false);
-                        }
-                      }}
-                      className="px-3 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-lg whitespace-nowrap shrink-0"
-                    >
-                      {connectingGoogle ? 'Menghubungkan...' : 'Hubungkan Google'}
-                    </button>
-                  </div>
-                )}
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">Judul Karya</label>
@@ -987,7 +940,21 @@ export function MembersSection({
 
             <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
               <span className="font-mono tabular-nums">
-                Hadir: {member.attendance_count ?? 0} · Karya: {member.works_count ?? 0} · Poin: {member.lms_points ?? 0}
+                Hadir:{' '}
+                {Math.max(
+                  member.attendance_count ?? 0,
+                  allAttendance.filter(
+                    (a) =>
+                      a.username.toLowerCase() === member.username.toLowerCase() &&
+                      (a.status === 'Hadir' || a.status === 'Terlambat')
+                  ).length
+                )}{' '}
+                · Karya:{' '}
+                {Math.max(
+                  member.works_count ?? 0,
+                  allWorks.filter((w) => w.author_username.toLowerCase() === member.username.toLowerCase()).length
+                )}{' '}
+                · Poin: {member.lms_points ?? 0}
               </span>
               <span className="inline-flex items-center gap-1 font-medium text-[#1D4ED8]">
                 <QrCode className="w-3.5 h-3.5" />

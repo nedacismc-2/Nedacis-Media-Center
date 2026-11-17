@@ -7,6 +7,7 @@ import {
   createScheduleInFirestore,
   deleteScheduleInFirestore,
   remindScheduleInFirestore,
+  sanitizeDocId,
 } from '../lib/firestoreSync';
 import { formatDateID, getLocalTimeZoneLabel } from '../lib/mediaAssets';
 
@@ -36,13 +37,20 @@ export function ScheduleSection({
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const canManageSchedules = currentUser?.role === 'admin';
+  const actorMemberId = currentUser?.firestoreId?.startsWith('member_')
+    ? currentUser.firestoreId
+    : currentUser?.username
+    ? sanitizeDocId(`member_${currentUser.username}`)
+    : undefined;
+
   const handleCreateSchedule = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
     try {
       let createdSchedule: ScheduleItem | null = null;
 
-      if (auth.currentUser) {
+      if (auth.currentUser || canManageSchedules) {
         const firestoreId = await createScheduleInFirestore({
           title,
           division,
@@ -52,6 +60,7 @@ export function ScheduleSection({
           location,
           mentor,
           description,
+          createdByMemberId: actorMemberId,
         });
         createdSchedule = {
           id: Date.now(),
@@ -90,14 +99,14 @@ export function ScheduleSection({
       }
 
       if (!createdSchedule) {
-        throw new Error('Masuk sebagai Admin atau hubungkan akun Google Firebase terlebih dahulu.');
+        throw new Error('Masuk sebagai Admin atau Pembina terlebih dahulu untuk menambah jadwal.');
       }
 
       onScheduleAdded(createdSchedule);
       setShowAddModal(false);
       setTitle('');
       setDescription('');
-      onToast('Jadwal baru ditambahkan dan tersinkronisasi untuk seluruh siswa.', 'success');
+      onToast('Jadwal baru ditambahkan dan tersinkronisasi ke Firebase untuk seluruh siswa.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menambah jadwal.', 'error');
     } finally {
@@ -107,7 +116,7 @@ export function ScheduleSection({
 
   const handleSendReminder = async (schedule: ScheduleItem) => {
     try {
-      if (auth.currentUser && schedule.firestoreId) {
+      if ((auth.currentUser || canManageSchedules) && schedule.firestoreId) {
         await remindScheduleInFirestore(schedule.firestoreId);
       }
       if (getStoredToken()) {
@@ -121,7 +130,7 @@ export function ScheduleSection({
 
   const handleDelete = async (schedule: ScheduleItem) => {
     try {
-      if (auth.currentUser && schedule.firestoreId) {
+      if ((auth.currentUser || canManageSchedules) && schedule.firestoreId) {
         await deleteScheduleInFirestore(schedule.firestoreId);
       }
       if (getStoredToken()) {

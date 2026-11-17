@@ -15,8 +15,11 @@ import type { LmsTask, LmsTaskStage, StudentProfile } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
 import { uploadFileToCloud } from '../lib/cloudFiles';
-import { useFirebase } from '../context/FirebaseContext';
-import { completeLmsStageInFirestore, submitLmsTaskInFirestore } from '../lib/firestoreSync';
+import {
+  completeLmsStageInFirestore,
+  sanitizeDocId,
+  submitLmsTaskInFirestore,
+} from '../lib/firestoreSync';
 import { formatDateID } from '../lib/mediaAssets';
 import { CloudFileAttachment } from './CloudMedia';
 
@@ -35,13 +38,18 @@ export function LmsTasksSection({
   onTaskUpdated,
   onToast,
 }: LmsTasksSectionProps) {
-  const { firebaseUser, signInWithGoogle } = useFirebase();
   const [filter, setFilter] = useState<'all' | 'pending' | 'done'>('all');
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(
     initialSelectedTaskId ?? (tasks[0]?.id || null)
   );
   const [activeStageIdx, setActiveStageIdx] = useState<number>(0);
-  const [connectingGoogle, setConnectingGoogle] = useState(false);
+
+  const memberDocId = currentUser.firestoreId?.startsWith('member_')
+    ? currentUser.firestoreId
+    : sanitizeDocId(`member_${currentUser.username}`);
+  const effectiveActorId = memberDocId.startsWith('member_')
+    ? memberDocId
+    : auth.currentUser?.uid || memberDocId;
 
   // Practice stage input
   const [practiceNotes, setPracticeNotes] = useState<Record<number, string>>({});
@@ -116,12 +124,12 @@ export function LmsTasksSection({
       const responseText = practiceNotes[stage.id] || '';
       let updatedTask: LmsTask | null = null;
 
-      if (auth.currentUser && task.firestoreId && stage.firestoreId) {
+      if (task.firestoreId && stage.firestoreId) {
         await completeLmsStageInFirestore({
           taskId: task.firestoreId,
           stageId: stage.firestoreId,
           responseText,
-          memberId: currentUser.firestoreId,
+          memberId: memberDocId,
         });
         const nextProgress = [
           ...task.progress.filter((p) => p.stage_id !== stage.id),
@@ -154,7 +162,7 @@ export function LmsTasksSection({
       if (nextIdx < task.stages.length) {
         setActiveStageIdx(nextIdx);
       }
-      onToast(`Tahap "${stage.title}" selesai! Tahap berikutnya kini terbuka.`, 'success');
+      onToast(`Tahap "${stage.title}" selesai & tersimpan di Firebase! Tahap berikutnya kini terbuka.`, 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menyelesaikan tahap ini.', 'error');
     } finally {
@@ -178,40 +186,23 @@ export function LmsTasksSection({
       let fileType = uploadFile?.type || task.submission?.file_type || '';
 
       if (uploadFile) {
-        if (auth.currentUser) {
-          const uploaded = await uploadFileToCloud(uploadFile, { isPublic: false });
-          fileUrl = uploaded.cloudUrl;
-          fileName = uploaded.fileName;
-          fileType = uploaded.mimeType;
-        } else if (getStoredToken()) {
-          const formData = new FormData();
-          formData.append('file', uploadFile);
-          formData.append('submissionNote', submissionNote.trim());
-          const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
-            method: 'POST',
-            body: formData,
-          });
-          updatedTask = res.task;
-          nextTotalPoints = res.totalPoints;
-          if (res.task.submission?.file_url) {
-            fileUrl = res.task.submission.file_url;
-            fileName = res.task.submission.file_name || fileName;
-          }
-        } else {
-          throw new Error(
-            'Hubungkan akun Google terlebih dahulu agar file tugas dapat diunggah dan tersinkron di semua perangkat.'
-          );
-        }
+        const uploaded = await uploadFileToCloud(uploadFile, {
+          isPublic: true,
+          uploaderMemberId: effectiveActorId,
+        });
+        fileUrl = uploaded.cloudUrl;
+        fileName = uploaded.fileName;
+        fileType = uploaded.mimeType;
       }
 
-      if (auth.currentUser && task.firestoreId) {
+      if (task.firestoreId) {
         const subId = await submitLmsTaskInFirestore({
           taskId: task.firestoreId,
           fileUrl,
           fileName,
           fileType,
           submissionNote: submissionNote.trim(),
-          memberId: currentUser.firestoreId,
+          memberId: memberDocId,
           fullName: currentUser.full_name,
           username: currentUser.username,
           kelas: currentUser.kelas,
@@ -222,7 +213,7 @@ export function LmsTasksSection({
           submission: {
             id: Date.now(),
             firestoreId: subId,
-            userUid: auth.currentUser.uid,
+            userUid: effectiveActorId,
             task_id: task.id,
             user_id: currentUser.id,
             file_url: fileUrl,
@@ -243,8 +234,9 @@ export function LmsTasksSection({
           mirrorForm.append('submissionNote', submissionNote.trim());
           void apiFetch(`/api/tasks/${task.id}/submit`, { method: 'POST', body: mirrorForm }).catch(() => {});
         }
-      } else if (!updatedTask && getStoredToken()) {
+      } else if (getStoredToken()) {
         const formData = new FormData();
+        if (uploadFile) formData.append('file', uploadFile);
         formData.append('submissionNote', submissionNote.trim());
         const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
           method: 'POST',
@@ -261,7 +253,7 @@ export function LmsTasksSection({
       onToast(
         nextTotalPoints !== undefined
           ? `Tugas "${task.title}" berhasil diunggah! Anda memperoleh +${task.points_reward} Poin.`
-          : `Tugas "${task.title}" terkirim ke Cloud Firestore dan menunggu verifikasi poin Pembina.`,
+          : `Tugas "${task.title}" tersimpan di Firebase dan menunggu verifikasi poin Pembina.`,
         'success'
       );
     } catch (err) {
@@ -700,32 +692,6 @@ export function LmsTasksSection({
                                 />
                               </div>
                             )}
-                          </div>
-                        )}
-
-                        {!firebaseUser && (
-                          <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                            <p className="text-xs text-amber-900 leading-relaxed">
-                              Hubungkan akun Google terlebih dahulu agar file hasil tugas dapat diunggah dan tersimpan ke Cloud.
-                            </p>
-                            <button
-                              type="button"
-                              disabled={connectingGoogle}
-                              onClick={async () => {
-                                setConnectingGoogle(true);
-                                try {
-                                  await signInWithGoogle();
-                                  onToast('Akun Google terhubung! Anda siap mengunggah file tugas.', 'success');
-                                } catch (err) {
-                                  onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google.', 'error');
-                                } finally {
-                                  setConnectingGoogle(false);
-                                }
-                              }}
-                              className="px-3 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-lg whitespace-nowrap shrink-0"
-                            >
-                              {connectingGoogle ? 'Menghubungkan...' : 'Hubungkan Google untuk Upload'}
-                            </button>
                           </div>
                         )}
 

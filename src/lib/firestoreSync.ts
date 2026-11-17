@@ -209,9 +209,10 @@ export async function createNewsInFirestore(input: {
   content: string;
   authorName: string;
   publishedAt: string;
+  createdByMemberId?: string;
 }): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google Admin terlebih dahulu.');
+  const uid = auth.currentUser?.uid || (input.createdByMemberId ? sanitizeDocId(input.createdByMemberId) : '');
+  if (!uid) throw new Error('Masuk sebagai Admin atau Pembina terlebih dahulu.');
   const docId = `news_${Date.now()}`;
   const path = `news_articles/${docId}`;
   try {
@@ -281,9 +282,10 @@ export async function createScheduleInFirestore(input: {
   location: string;
   description: string;
   mentor: string;
+  createdByMemberId?: string;
 }): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google Admin terlebih dahulu.');
+  const uid = auth.currentUser?.uid || (input.createdByMemberId ? sanitizeDocId(input.createdByMemberId) : '');
+  if (!uid) throw new Error('Masuk sebagai Admin atau Pembina terlebih dahulu.');
   const docId = `sched_${Date.now()}`;
   const path = `schedules/${docId}`;
   try {
@@ -629,20 +631,24 @@ export async function createWorkInFirestore(params: {
   mediaUrl: string;
   authorName: string;
   authorUsername: string;
+  authorMemberId?: string;
   authorKelas: string;
   authorDivision: string;
   authorAvatarColor: string;
   authorAvatarUrl: string;
   isAdminUploader: boolean;
 }): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google terlebih dahulu untuk menyimpan karya ke Cloud.');
+  const memberDocId = params.authorMemberId
+    ? sanitizeDocId(params.authorMemberId)
+    : sanitizeDocId(`member_${params.authorUsername}`);
+  const uid = auth.currentUser?.uid || memberDocId;
+  if (!uid) throw new Error('Masuk ke akun anggota terlebih dahulu untuk menyimpan karya ke Firebase.');
   const docId = `work_${Date.now()}`;
   const path = `works/${docId}`;
   try {
     await setDoc(doc(db, 'works', docId), {
       authorUid: uid,
-      authorMemberId: sanitizeDocId(`member_${params.authorUsername}`),
+      authorMemberId: memberDocId,
       authorName: clampStr(params.authorName, 120),
       authorUsername: clampStr(params.authorUsername, 60),
       authorKelas: clampStr(params.authorKelas, 30),
@@ -695,9 +701,13 @@ export async function deleteWorkInFirestore(workId: string): Promise<void> {
   }
 }
 
-export async function toggleWorkLikeInFirestore(workId: string, currentLikesCount: number): Promise<boolean> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google untuk menyukai karya.');
+export async function toggleWorkLikeInFirestore(
+  workId: string,
+  currentLikesCount: number,
+  actorMemberId?: string
+): Promise<boolean> {
+  const uid = auth.currentUser?.uid || (actorMemberId ? sanitizeDocId(actorMemberId) : '');
+  if (!uid) throw new Error('Masuk ke akun anggota untuk menyukai karya.');
   const workRef = doc(db, 'works', workId);
   const likeRef = doc(db, 'works', workId, 'likes', uid);
   try {
@@ -734,12 +744,16 @@ export async function addWorkCommentInFirestore(params: {
   currentCommentsCount: number;
   authorName: string;
   authorUsername: string;
+  authorMemberId?: string;
   authorKelas: string;
   authorRole: 'admin' | 'student';
   content: string;
 }): Promise<WorkComment> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google untuk mengirim komentar.');
+  const memberDocId = params.authorMemberId
+    ? sanitizeDocId(params.authorMemberId)
+    : sanitizeDocId(`member_${params.authorUsername}`);
+  const uid = auth.currentUser?.uid || memberDocId;
+  if (!uid) throw new Error('Masuk ke akun anggota untuk mengirim komentar.');
   const commentId = `cmt_${Date.now()}`;
   const workRef = doc(db, 'works', params.workId);
   const commentRef = doc(db, 'works', params.workId, 'comments', commentId);
@@ -780,8 +794,12 @@ export async function addWorkCommentInFirestore(params: {
   }
 }
 
-export async function shareWorkInFirestore(workId: string, currentSharesCount: number): Promise<void> {
-  if (!auth.currentUser?.uid) return;
+export async function shareWorkInFirestore(
+  workId: string,
+  currentSharesCount: number,
+  actorMemberId?: string
+): Promise<void> {
+  if (!auth.currentUser?.uid && !actorMemberId) return;
   const path = `works/${workId}`;
   try {
     await updateDoc(doc(db, 'works', workId), {
@@ -808,8 +826,8 @@ export async function toggleWorkCommentsInFirestore(
   }
 }
 
-export async function fetchWorkLikedByUser(workId: string): Promise<boolean> {
-  const uid = auth.currentUser?.uid;
+export async function fetchWorkLikedByUser(workId: string, actorMemberId?: string): Promise<boolean> {
+  const uid = auth.currentUser?.uid || (actorMemberId ? sanitizeDocId(actorMemberId) : '');
   if (!uid) return false;
   try {
     const snap = await getDoc(doc(db, 'works', workId, 'likes', uid));
@@ -923,42 +941,94 @@ export function subscribePendingWorksAdmin(onData: (works: StudentWork[]) => voi
 export function subscribeAttendanceRecords(
   isAdmin: boolean,
   uid: string,
-  onData: (records: AttendanceRecord[]) => void
+  onData: (records: AttendanceRecord[]) => void,
+  memberId?: string
 ): Unsubscribe {
   const path = 'attendance_records';
-  const q = isAdmin
-    ? query(collection(db, path))
-    : query(collection(db, path), where('studentUid', '==', uid));
+  const cleanMemberId = memberId ? sanitizeDocId(memberId) : '';
 
-  return onSnapshot(
-    q,
-    (snap) => {
-      const list: AttendanceRecord[] = snap.docs.map((docSnap) => {
-        const d = docSnap.data();
-        return {
-          id: deterministicNumericId(docSnap.id),
-          firestoreId: docSnap.id,
-          user_id: 0,
-          attendance_date: String(d.attendanceDate || ''),
-          check_in_time: String(d.checkInTime || ''),
-          method: (d.method as AttendanceRecord['method']) || 'NFC/RFID',
-          status: (d.status as AttendanceRecord['status']) || 'Hadir',
-          session_title: String(d.sessionTitle || ''),
-          recorded_by: String(d.recordedBy || ''),
-          created_at: toIsoString(d.createdAt),
-          full_name: String(d.fullName || ''),
-          username: String(d.username || ''),
-          nis: '',
-          kelas: String(d.kelas || ''),
-          division: String(d.division || ''),
-          nfc_uid: '',
-        };
-      });
-      list.sort((a, b) => `${b.attendance_date} ${b.check_in_time}`.localeCompare(`${a.attendance_date} ${a.check_in_time}`));
-      onData(list);
-    },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
-  );
+  const mapDoc = (docSnap: { id: string; data: () => Record<string, unknown> }): AttendanceRecord => {
+    const d = docSnap.data();
+    return {
+      id: deterministicNumericId(docSnap.id),
+      firestoreId: docSnap.id,
+      user_id: 0,
+      attendance_date: String(d.attendanceDate || ''),
+      check_in_time: String(d.checkInTime || ''),
+      method: (d.method as AttendanceRecord['method']) || 'NFC/RFID',
+      status: (d.status as AttendanceRecord['status']) || 'Hadir',
+      session_title: String(d.sessionTitle || ''),
+      recorded_by: String(d.recordedBy || ''),
+      created_at: toIsoString(d.createdAt),
+      full_name: String(d.fullName || ''),
+      username: String(d.username || ''),
+      nis: '',
+      kelas: String(d.kelas || ''),
+      division: String(d.division || ''),
+      nfc_uid: '',
+    };
+  };
+
+  if (isAdmin) {
+    return onSnapshot(
+      query(collection(db, path)),
+      (snap) => {
+        const list = snap.docs.map((docSnap) => mapDoc(docSnap));
+        list.sort((a, b) => `${b.attendance_date} ${b.check_in_time}`.localeCompare(`${a.attendance_date} ${a.check_in_time}`));
+        onData(list);
+      },
+      (error) => handleFirestoreError(error, OperationType.LIST, path)
+    );
+  }
+
+  const byMember = new Map<string, AttendanceRecord>();
+  const byUid = new Map<string, AttendanceRecord>();
+  const emitMerged = () => {
+    const merged = new Map<string, AttendanceRecord>();
+    byUid.forEach((v, k) => merged.set(k, v));
+    byMember.forEach((v, k) => merged.set(k, v));
+    const list = Array.from(merged.values());
+    list.sort((a, b) => `${b.attendance_date} ${b.check_in_time}`.localeCompare(`${a.attendance_date} ${a.check_in_time}`));
+    onData(list);
+  };
+
+  const unsubs: Unsubscribe[] = [];
+
+  if (cleanMemberId) {
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, path), where('memberId', '==', cleanMemberId)),
+        (snap) => {
+          byMember.clear();
+          for (const docSnap of snap.docs) {
+            byMember.set(docSnap.id, mapDoc(docSnap));
+          }
+          emitMerged();
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, path)
+      )
+    );
+  }
+
+  if (uid) {
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, path), where('studentUid', '==', uid)),
+        (snap) => {
+          byUid.clear();
+          for (const docSnap of snap.docs) {
+            byUid.set(docSnap.id, mapDoc(docSnap));
+          }
+          emitMerged();
+        },
+        (error) => handleFirestoreError(error, OperationType.LIST, path)
+      )
+    );
+  }
+
+  return () => {
+    unsubs.forEach((u) => u());
+  };
 }
 
 export async function recordAttendanceInFirestore(params: {
@@ -974,16 +1044,18 @@ export async function recordAttendanceInFirestore(params: {
   status: 'Hadir' | 'Terlambat' | 'Izin';
   sessionTitle: string;
   recordedBy: string;
+  recordedByUid?: string;
 }): Promise<void> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google Admin untuk mencatat absensi ke Firebase.');
-  const docId = sanitizeDocId(`att_${params.memberId}_${params.attendanceDate}`);
+  const uid = auth.currentUser?.uid || (params.recordedByUid ? sanitizeDocId(params.recordedByUid) : '');
+  if (!uid) throw new Error('Masuk sebagai Admin atau Pembina untuk mencatat absensi ke Firebase.');
+  const memberDocId = sanitizeDocId(params.memberId);
+  const docId = sanitizeDocId(`att_${memberDocId}_${params.attendanceDate}`);
   const ref = doc(db, 'attendance_records', docId);
   try {
     const existing = await getDoc(ref);
     if (!existing.exists()) {
       await setDoc(ref, {
-        memberId: sanitizeDocId(params.memberId),
+        memberId: memberDocId,
         studentUid: clampStr(params.studentUid || '', 128),
         fullName: clampStr(params.fullName, 120),
         username: clampStr(params.username, 60),
@@ -1008,6 +1080,21 @@ export async function recordAttendanceInFirestore(params: {
         recordedByUid: uid,
       });
     }
+
+    // Automatically push real-time attendance notification to student account across all devices
+    const notifId = sanitizeDocId(`notif_att_${memberDocId}_${params.attendanceDate}_${Date.now()}`);
+    await setDoc(doc(db, 'notifications', notifId), {
+      targetUid: memberDocId,
+      type: 'attendance',
+      title: clampStr(`Absensi Tercatat (${params.status})`, 160),
+      message: clampStr(
+        `${params.sessionTitle} · ${params.method} pukul ${params.checkInTime} oleh ${params.recordedBy}`,
+        600
+      ),
+      linkTarget: clampStr(`profil/${params.username}`, 120),
+      isRead: false,
+      createdAt: serverTimestamp(),
+    }).catch(() => {});
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `attendance_records/${docId}`);
   }
@@ -1016,9 +1103,12 @@ export async function recordAttendanceInFirestore(params: {
 export function subscribeLmsTasks(
   isAdmin: boolean,
   uid: string,
-  onData: (tasks: LmsTask[], adminTasks: AdminLmsTask[]) => void
+  onData: (tasks: LmsTask[], adminTasks: AdminLmsTask[]) => void,
+  memberId?: string
 ): Unsubscribe {
   const path = 'lms_tasks';
+  const cleanMemberId = memberId ? sanitizeDocId(memberId) : '';
+  const actorIds = Array.from(new Set([uid, cleanMemberId].filter(Boolean)));
   const q = isAdmin ? query(collection(db, path)) : query(collection(db, path), where('isPublished', '==', true));
 
   return onSnapshot(
@@ -1029,31 +1119,62 @@ export function subscribeLmsTasks(
         const adminTasks: AdminLmsTask[] = [];
 
         const progressByTask = new Map<string, Array<{ stage_id: number; stageFirestoreId: string; response_text: string; completed_at: string }>>();
-        let subSnapDocs: Array<{ id: string; data: () => Record<string, unknown> }> = [];
+        const seenProgressIds = new Set<string>();
+        const subSnapMap = new Map<string, { id: string; data: () => Record<string, unknown> }>();
 
-        if (uid) {
-          const progressSnap = await getDocs(
-            query(collection(db, 'lms_task_progress'), where('userUid', '==', uid))
-          );
-          for (const p of progressSnap.docs) {
-            const pd = p.data();
-            const tId = String(pd.taskId || '');
-            const arr = progressByTask.get(tId) || [];
-            arr.push({
-              stage_id: 0,
-              stageFirestoreId: String(pd.stageId || ''),
-              response_text: String(pd.responseText || ''),
-              completed_at: toIsoString(pd.completedAt),
-            });
-            progressByTask.set(tId, arr);
+        if (actorIds.length > 0) {
+          const progressPromises = [
+            ...(uid ? [getDocs(query(collection(db, 'lms_task_progress'), where('userUid', '==', uid)))] : []),
+            ...(cleanMemberId && cleanMemberId !== uid
+              ? [getDocs(query(collection(db, 'lms_task_progress'), where('userUid', '==', cleanMemberId)))]
+              : []),
+            ...(cleanMemberId
+              ? [getDocs(query(collection(db, 'lms_task_progress'), where('memberId', '==', cleanMemberId)))]
+              : []),
+          ];
+          const progressSnaps = await Promise.all(progressPromises);
+          for (const progressSnap of progressSnaps) {
+            for (const p of progressSnap.docs) {
+              if (seenProgressIds.has(p.id)) continue;
+              seenProgressIds.add(p.id);
+              const pd = p.data();
+              const tId = String(pd.taskId || '');
+              const arr = progressByTask.get(tId) || [];
+              arr.push({
+                stage_id: 0,
+                stageFirestoreId: String(pd.stageId || ''),
+                response_text: String(pd.responseText || ''),
+                completed_at: toIsoString(pd.completedAt),
+              });
+              progressByTask.set(tId, arr);
+            }
           }
 
-          const subQuery = isAdmin
-            ? query(collection(db, 'lms_task_submissions'))
-            : query(collection(db, 'lms_task_submissions'), where('userUid', '==', uid));
-          const subSnap = await getDocs(subQuery);
-          subSnapDocs = subSnap.docs.map((s) => ({ id: s.id, data: () => s.data() }));
+          if (isAdmin) {
+            const subSnap = await getDocs(query(collection(db, 'lms_task_submissions')));
+            for (const s of subSnap.docs) {
+              subSnapMap.set(s.id, { id: s.id, data: () => s.data() });
+            }
+          } else {
+            const subPromises = [
+              ...(uid ? [getDocs(query(collection(db, 'lms_task_submissions'), where('userUid', '==', uid)))] : []),
+              ...(cleanMemberId && cleanMemberId !== uid
+                ? [getDocs(query(collection(db, 'lms_task_submissions'), where('userUid', '==', cleanMemberId)))]
+                : []),
+              ...(cleanMemberId
+                ? [getDocs(query(collection(db, 'lms_task_submissions'), where('memberId', '==', cleanMemberId)))]
+                : []),
+            ];
+            const subSnaps = await Promise.all(subPromises);
+            for (const subSnap of subSnaps) {
+              for (const s of subSnap.docs) {
+                subSnapMap.set(s.id, { id: s.id, data: () => s.data() });
+              }
+            }
+          }
         }
+
+        const subSnapDocs = Array.from(subSnapMap.values());
 
         for (let idx = 0; idx < snap.docs.length; idx++) {
           const docSnap = snap.docs[idx];
@@ -1115,7 +1236,13 @@ export function subscribeLmsTasks(
               };
             });
 
-          const mySub = taskSubs.find((s) => s.userUid === uid) || null;
+          const mySub =
+            taskSubs.find(
+              (s) =>
+                (uid && s.userUid === uid) ||
+                (cleanMemberId && (s.userUid === cleanMemberId || s.firestoreId?.endsWith(`__${cleanMemberId}`)))
+            ) || null;
+
           const baseTask: LmsTask = {
             id: taskNumId,
             firestoreId: docSnap.id,
@@ -1158,6 +1285,7 @@ export async function createLmsTaskInFirestore(params: {
   pointsReward: number;
   dueDate: string;
   creatorName: string;
+  createdByMemberId?: string;
   stages: Array<{
     stage_type: 'reading' | 'practice' | 'upload';
     title: string;
@@ -1165,8 +1293,10 @@ export async function createLmsTaskInFirestore(params: {
     attachment_url: string;
   }>;
 }): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google Admin untuk menyimpan tugas ke Firebase.');
+  const uid =
+    auth.currentUser?.uid ||
+    (params.createdByMemberId ? sanitizeDocId(params.createdByMemberId) : '');
+  if (!uid) throw new Error('Masuk sebagai Admin atau Pembina untuk menyimpan tugas ke Firebase.');
   const taskId = `task_${Date.now()}`;
   const path = `lms_tasks/${taskId}`;
   try {
@@ -1216,7 +1346,10 @@ export async function completeLmsStageInFirestore(params: {
   responseText: string;
   memberId?: string;
 }): Promise<void> {
-  const uid = auth.currentUser?.uid;
+  const cleanMemberId = params.memberId ? sanitizeDocId(params.memberId) : '';
+  const uid = cleanMemberId.startsWith('member_')
+    ? cleanMemberId
+    : auth.currentUser?.uid || cleanMemberId;
   if (!uid) return;
   const progressId = sanitizeDocId(`${params.taskId}__${params.stageId}__${uid}`);
   const ref = doc(db, 'lms_task_progress', progressId);
@@ -1227,7 +1360,7 @@ export async function completeLmsStageInFirestore(params: {
         taskId: sanitizeDocId(params.taskId),
         stageId: sanitizeDocId(params.stageId),
         userUid: uid,
-        memberId: clampStr(params.memberId || '', 128),
+        memberId: clampStr(cleanMemberId || uid, 128),
         responseText: clampStr(params.responseText, 1000),
         completedAt: serverTimestamp(),
       });
@@ -1254,8 +1387,15 @@ export async function submitLmsTaskInFirestore(params: {
   kelas: string;
   division: string;
 }): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google untuk menyimpan pengumpulan tugas ke Firebase.');
+  const cleanMemberId = params.memberId
+    ? sanitizeDocId(params.memberId)
+    : params.username
+    ? sanitizeDocId(`member_${params.username}`)
+    : '';
+  const uid = cleanMemberId.startsWith('member_')
+    ? cleanMemberId
+    : auth.currentUser?.uid || cleanMemberId;
+  if (!uid) throw new Error('Masuk ke akun anggota untuk menyimpan pengumpulan tugas ke Firebase.');
   const taskId = sanitizeDocId(params.taskId);
   const subId = sanitizeDocId(`${taskId}__${uid}`);
   const ref = doc(db, 'lms_task_submissions', subId);
@@ -1265,7 +1405,7 @@ export async function submitLmsTaskInFirestore(params: {
       await setDoc(ref, {
         taskId,
         userUid: uid,
-        memberId: clampStr(params.memberId || '', 128),
+        memberId: clampStr(cleanMemberId, 128),
         fullName: clampStr(params.fullName, 120),
         username: clampStr(params.username, 60),
         kelas: clampStr(params.kelas, 30),
@@ -1337,9 +1477,9 @@ export function subscribeBlockedWords(
   );
 }
 
-export async function addBlockedWordInFirestore(word: string): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Masuk dengan akun Google Admin terlebih dahulu.');
+export async function addBlockedWordInFirestore(word: string, createdByMemberId?: string): Promise<string> {
+  const uid = auth.currentUser?.uid || (createdByMemberId ? sanitizeDocId(createdByMemberId) : '');
+  if (!uid) throw new Error('Masuk sebagai Admin atau Pembina terlebih dahulu.');
   const docId = sanitizeDocId(`bw_${word.toLowerCase()}`);
   const path = `blocked_words/${docId}`;
   try {
@@ -1368,7 +1508,6 @@ export async function updateMemberAvatarInFirestore(
   memberId: string,
   avatarUrl: string
 ): Promise<void> {
-  if (!auth.currentUser?.uid) return;
   const path = `members_public/${memberId}`;
   try {
     await updateDoc(doc(db, 'members_public', memberId), {
@@ -1385,12 +1524,15 @@ export async function updateMemberAvatarInFirestore(
 export function subscribeNotificationsFirestore(
   isAdmin: boolean,
   uid: string,
-  onData: (notifs: NotificationItem[]) => void
+  onData: (notifs: NotificationItem[]) => void,
+  memberId?: string
 ): Unsubscribe {
   const path = 'notifications';
+  const cleanMemberId = memberId ? sanitizeDocId(memberId) : '';
+  const targets = Array.from(new Set(['ALL', uid, cleanMemberId].filter(Boolean)));
   const q = isAdmin
     ? query(collection(db, path))
-    : query(collection(db, path), where('targetUid', 'in', [uid, 'ALL']));
+    : query(collection(db, path), where('targetUid', 'in', targets));
 
   return onSnapshot(
     q,

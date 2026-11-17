@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   BookOpen,
   CheckCircle2,
+  CheckSquare,
   ClipboardCheck,
   Cloud,
   CreditCard,
   Database,
   Download,
+  ExternalLink,
+  File as FileIcon,
   FileText,
+  HardDrive,
   Image as ImageIcon,
   LayoutTemplate,
   Newspaper,
@@ -18,11 +23,14 @@ import {
   Radio,
   RefreshCw,
   RotateCcw,
+  Search,
   ShieldAlert,
+  Square,
   Trash2,
   UploadCloud,
   Usb,
   Users,
+  Video,
   XCircle,
 } from 'lucide-react';
 import type {
@@ -37,8 +45,18 @@ import type {
   StudentWork,
 } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
+import { useFirebase } from '../context/FirebaseContext';
 import { auth } from '../lib/firebase';
-import { uploadFileToCloud } from '../lib/cloudFiles';
+import {
+  CLOUD_FILE_PREFIX,
+  deleteMultipleUploadedFilesFromCloud,
+  deleteUploadedFileFromCloud,
+  downloadOrOpenMedia,
+  formatBytes,
+  uploadFileToCloud,
+  type CloudStorageSummary,
+  type CloudUploadedFileRecord,
+} from '../lib/cloudFiles';
 import {
   addBlockedWordInFirestore,
   createLmsTaskInFirestore,
@@ -67,6 +85,9 @@ interface AdminSectionProps {
   cloudAdminTasks?: AdminLmsTask[];
   cloudPendingWorks?: StudentWork[];
   cloudBlockedWords?: Array<{ id: number; firestoreId?: string; word: string }>;
+  cloudStorage?: CloudStorageSummary | null;
+  currentMemberId?: string;
+  isPortalAdmin?: boolean;
   isFirebaseAdmin?: boolean;
   firebaseEmail?: string | null;
   cloudSeeded?: boolean;
@@ -89,6 +110,9 @@ export function AdminSection({
   cloudAdminTasks,
   cloudPendingWorks,
   cloudBlockedWords,
+  cloudStorage = null,
+  currentMemberId,
+  isPortalAdmin = false,
   isFirebaseAdmin = false,
   firebaseEmail = null,
   cloudSeeded = false,
@@ -102,8 +126,18 @@ export function AdminSection({
   onOpenAdminPanel,
   onToast,
 }: AdminSectionProps) {
+  const { signInWithGoogle } = useFirebase();
+  const canWriteCloudAdmin = isPortalAdmin || isFirebaseAdmin;
   const [tab, setTab] = useState<AdminSubTab>(mode === 'approval' ? 'review' : 'students');
   const [syncingCloud, setSyncingCloud] = useState(false);
+
+  // Cloud Storage Manager state
+  const [storageSearch, setStorageSearch] = useState('');
+  const [storageTypeFilter, setStorageTypeFilter] = useState<'all' | 'image' | 'video' | 'other'>('all');
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
+  const [confirmDeleteMode, setConfirmDeleteMode] = useState<'none' | 'bulk' | string>('none');
+  const [deletingStorageFiles, setDeletingStorageFiles] = useState(false);
+  const [connectingGoogleAdmin, setConnectingGoogleAdmin] = useState(false);
 
   // Create student state
   const [username, setUsername] = useState('');
@@ -261,7 +295,7 @@ export function AdminSection({
   ]);
 
   const loadPendingWorks = useCallback(async () => {
-    if (isFirebaseAdmin && cloudPendingWorks) {
+    if (canWriteCloudAdmin && cloudPendingWorks) {
       hasLoadedPendingRef.current = true;
       setPendingWorks(cloudPendingWorks);
       return;
@@ -277,10 +311,10 @@ export function AdminSection({
     } finally {
       setLoadingPending(false);
     }
-  }, [isFirebaseAdmin, cloudPendingWorks]);
+  }, [canWriteCloudAdmin, cloudPendingWorks]);
 
   const loadAdminTasks = useCallback(async () => {
-    if (isFirebaseAdmin && cloudAdminTasks) {
+    if (canWriteCloudAdmin && cloudAdminTasks) {
       setAdminTasks(cloudAdminTasks);
       return;
     }
@@ -294,26 +328,122 @@ export function AdminSection({
     } finally {
       setLoadingTasks(false);
     }
-  }, [isFirebaseAdmin, cloudAdminTasks]);
+  }, [canWriteCloudAdmin, cloudAdminTasks]);
 
   useEffect(() => {
-    if (isFirebaseAdmin && cloudPendingWorks) {
+    if (canWriteCloudAdmin && cloudPendingWorks) {
       hasLoadedPendingRef.current = true;
       setPendingWorks(cloudPendingWorks);
     }
-  }, [isFirebaseAdmin, cloudPendingWorks]);
+  }, [canWriteCloudAdmin, cloudPendingWorks]);
 
   useEffect(() => {
-    if (isFirebaseAdmin && cloudAdminTasks) {
+    if (canWriteCloudAdmin && cloudAdminTasks) {
       setAdminTasks(cloudAdminTasks);
     }
-  }, [isFirebaseAdmin, cloudAdminTasks]);
+  }, [canWriteCloudAdmin, cloudAdminTasks]);
 
   useEffect(() => {
     if (hasLoadedPendingRef.current) {
       onPendingCountChange?.(pendingWorks.length);
     }
   }, [pendingWorks, onPendingCountChange]);
+
+  // Prune selected file IDs that no longer exist
+  useEffect(() => {
+    if (!cloudStorage) {
+      setSelectedFileIds([]);
+      return;
+    }
+    const existing = new Set(cloudStorage.files.map((f) => f.fileId));
+    setSelectedFileIds((prev) => prev.filter((id) => existing.has(id)));
+  }, [cloudStorage]);
+
+  const filteredStorageFiles = useMemo<CloudUploadedFileRecord[]>(() => {
+    if (!cloudStorage) return [];
+    const q = storageSearch.trim().toLowerCase();
+    return cloudStorage.files.filter((f) => {
+      if (storageTypeFilter === 'image' && !f.mimeType.startsWith('image/')) return false;
+      if (storageTypeFilter === 'video' && !f.mimeType.startsWith('video/')) return false;
+      if (storageTypeFilter === 'other' && (f.mimeType.startsWith('image/') || f.mimeType.startsWith('video/'))) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        f.fileName.toLowerCase().includes(q) ||
+        f.uploaderUid.toLowerCase().includes(q) ||
+        f.mimeType.toLowerCase().includes(q)
+      );
+    });
+  }, [cloudStorage, storageSearch, storageTypeFilter]);
+
+  const selectedEstimatedBytes = useMemo(() => {
+    if (!cloudStorage || selectedFileIds.length === 0) return 0;
+    const set = new Set(selectedFileIds);
+    return cloudStorage.files
+      .filter((f) => set.has(f.fileId))
+      .reduce((sum, f) => sum + f.estimatedFirestoreBytes, 0);
+  }, [cloudStorage, selectedFileIds]);
+
+  const handleToggleSelectFile = (fileId: string) => {
+    setConfirmDeleteMode('none');
+    setSelectedFileIds((prev) =>
+      prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
+    );
+  };
+
+  const handleDeleteSingleCloudFile = async (file: CloudUploadedFileRecord) => {
+    if (!isFirebaseAdmin) {
+      onToast('Hubungkan Google Admin terlebih dahulu untuk menghapus file Cloud secara permanen.', 'error');
+      return;
+    }
+    setDeletingStorageFiles(true);
+    try {
+      await deleteUploadedFileFromCloud(file.fileId);
+      setSelectedFileIds((prev) => prev.filter((id) => id !== file.fileId));
+      setConfirmDeleteMode('none');
+      onToast(`File "${file.fileName}" berhasil dihapus dari penyimpanan Cloud Firebase.`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal menghapus file dari Cloud.', 'error');
+    } finally {
+      setDeletingStorageFiles(false);
+    }
+  };
+
+  const handleBulkDeleteCloudFiles = async () => {
+    if (!isFirebaseAdmin) {
+      onToast('Hubungkan Google Admin terlebih dahulu untuk menghapus file Cloud secara permanen.', 'error');
+      return;
+    }
+    if (selectedFileIds.length === 0) return;
+    setDeletingStorageFiles(true);
+    try {
+      const { deleted, failed } = await deleteMultipleUploadedFilesFromCloud(selectedFileIds);
+      setSelectedFileIds([]);
+      setConfirmDeleteMode('none');
+      if (failed > 0) {
+        onToast(`${deleted} file dihapus, ${failed} file gagal dihapus.`, 'info');
+      } else {
+        onToast(`${deleted} file terpilih berhasil dihapus permanen dari Cloud Firebase.`, 'success');
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal menghapus file terpilih.', 'error');
+    } finally {
+      setDeletingStorageFiles(false);
+    }
+  };
+
+  const handleConnectGoogleAdminForStorage = async () => {
+    setConnectingGoogleAdmin(true);
+    try {
+      await signInWithGoogle();
+      onToast('Berhasil terhubung dengan akun Google Admin.', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal masuk dengan Google Admin.', 'error');
+    } finally {
+      setConnectingGoogleAdmin(false);
+    }
+  };
 
   // Database Health & Backup state
   interface DbHealthState {
@@ -357,7 +487,7 @@ export function AdminSection({
 
   useEffect(() => {
     if (activeSubTab !== 'moderation') return;
-    if (isFirebaseAdmin && cloudBlockedWords) {
+    if (canWriteCloudAdmin && cloudBlockedWords) {
       setBlockedWords(cloudBlockedWords);
       return;
     }
@@ -365,7 +495,7 @@ export function AdminSection({
     apiFetch<{ words: Array<{ id: number; word: string }> }>('/api/admin/blocked-words')
       .then((res) => setBlockedWords(res.words))
       .catch(() => {});
-  }, [activeSubTab, isFirebaseAdmin, cloudBlockedWords]);
+  }, [activeSubTab, canWriteCloudAdmin, cloudBlockedWords]);
 
   // Global USB HID Keyboard Wedge listener while Admin is editing or listening for a card tap
   useEffect(() => {
@@ -618,15 +748,15 @@ export function AdminSection({
     e.preventDefault();
     if (!newWord.trim()) return;
     try {
-      if (auth.currentUser && isFirebaseAdmin) {
-        await addBlockedWordInFirestore(newWord.trim());
+      if (auth.currentUser || canWriteCloudAdmin) {
+        await addBlockedWordInFirestore(newWord.trim(), currentMemberId);
       }
       if (getStoredToken()) {
         const res = await apiFetch<{ words: Array<{ id: number; word: string }> }>('/api/admin/blocked-words', {
           method: 'POST',
           body: JSON.stringify({ word: newWord.trim() }),
         }).catch(() => null);
-        if (res && !isFirebaseAdmin) setBlockedWords(res.words);
+        if (res && !canWriteCloudAdmin) setBlockedWords(res.words);
       }
       setNewWord('');
       onToast('Kata negatif ditambahkan ke filter diskusi.', 'success');
@@ -637,7 +767,7 @@ export function AdminSection({
 
   const handleRemoveBlockedWord = async (bw: { id: number; firestoreId?: string; word: string }) => {
     try {
-      if (auth.currentUser && isFirebaseAdmin && bw.firestoreId) {
+      if ((auth.currentUser || canWriteCloudAdmin) && bw.firestoreId) {
         await deleteBlockedWordInFirestore(bw.firestoreId);
       }
       if (getStoredToken()) {
@@ -656,7 +786,7 @@ export function AdminSection({
       let createdArticle: NewsArticle | null = null;
       const publishedAt = new Date().toISOString().slice(0, 10);
 
-      if (auth.currentUser && isFirebaseAdmin) {
+      if (auth.currentUser || canWriteCloudAdmin) {
         const fId = await createNewsInFirestore({
           title: newsTitle,
           category: newsCategory,
@@ -664,6 +794,7 @@ export function AdminSection({
           content: newsContent,
           authorName: 'Pembina NMC SMPN 2 Ciamis',
           publishedAt,
+          createdByMemberId: currentMemberId,
         });
         createdArticle = {
           id: Date.now(),
@@ -981,8 +1112,11 @@ export function AdminSection({
     try {
       let fileUrl = '';
       let fileName = file.name;
-      if (auth.currentUser && isFirebaseAdmin) {
-        const uploaded = await uploadFileToCloud(file, { isPublic: true });
+      if (auth.currentUser || canWriteCloudAdmin) {
+        const uploaded = await uploadFileToCloud(file, {
+          isPublic: true,
+          uploaderMemberId: currentMemberId,
+        });
         fileUrl = uploaded.cloudUrl;
         fileName = uploaded.fileName;
       } else if (getStoredToken()) {
@@ -995,7 +1129,7 @@ export function AdminSection({
         fileUrl = res.fileUrl;
         fileName = res.fileName;
       } else {
-        throw new Error('Masuk dengan akun Google Admin terlebih dahulu untuk mengunggah lampiran materi.');
+        throw new Error('Masuk sebagai Admin atau Pembina untuk mengunggah lampiran materi.');
       }
 
       setDraftStages((prev) =>
@@ -1033,7 +1167,7 @@ export function AdminSection({
     setCreatingTask(true);
     try {
       let createdTask: AdminLmsTask | null = null;
-      if (auth.currentUser && isFirebaseAdmin) {
+      if (auth.currentUser || canWriteCloudAdmin) {
         const fId = await createLmsTaskInFirestore({
           title: taskTitle.trim(),
           description: taskDesc.trim(),
@@ -1041,6 +1175,7 @@ export function AdminSection({
           pointsReward: Number(taskPoints) || 100,
           dueDate: taskDueDate,
           creatorName: 'Pembina NMC',
+          createdByMemberId: currentMemberId,
           stages: draftStages.map((s) => ({
             stage_type: s.stage_type,
             title: s.title,
@@ -1115,7 +1250,7 @@ export function AdminSection({
 
   const handleDeleteLmsTask = async (task: AdminLmsTask) => {
     try {
-      if (auth.currentUser && isFirebaseAdmin && task.firestoreId) {
+      if ((auth.currentUser || canWriteCloudAdmin) && task.firestoreId) {
         await deleteLmsTaskInFirestore(task.firestoreId);
       }
       if (getStoredToken()) {
@@ -1139,7 +1274,7 @@ export function AdminSection({
       const nextPoints =
         status === 'revision' ? 0 : subPoints[sub.id] ?? sub.points_awarded ?? task.points_reward;
       const feedback = subFeedback[sub.id] ?? sub.admin_feedback ?? '';
-      if (auth.currentUser && isFirebaseAdmin && sub.firestoreId) {
+      if ((auth.currentUser || canWriteCloudAdmin) && sub.firestoreId) {
         await reviewLmsSubmissionInFirestore({
           submissionId: sub.firestoreId,
           status,
@@ -1178,7 +1313,7 @@ export function AdminSection({
     try {
       const note = reviewNotes[work.id] || '';
       let approvedWork: StudentWork | null = null;
-      if (auth.currentUser && isFirebaseAdmin && work.firestoreId) {
+      if ((auth.currentUser || canWriteCloudAdmin) && work.firestoreId) {
         await reviewWorkInFirestore(work.firestoreId, decision, note);
         if (decision === 'approved') {
           approvedWork = { ...work, approval_status: 'approved', review_note: note };
@@ -1350,9 +1485,57 @@ export function AdminSection({
           Panel Admin &amp; Pembina NMC
         </h1>
         <p className="text-sm text-slate-600 mt-1 max-w-2xl">
-          Kelola 20 akun siswa, pembina, dan kartu NFC, tinjau persetujuan karya anggota, atur filter komentar negatif, terbitkan liputan sekolah, serta ubah logo header NMC.
+          Kelola 20 akun siswa, pembina, dan kartu NFC, tinjau persetujuan karya anggota, pantau kapasitas penyimpanan Firebase, serta atur liputan dan tampilan portal.
         </p>
       </div>
+
+      {/* Cloud Storage Full / Warning Alert Banner */}
+      {cloudStorage && (cloudStorage.status === 'warning' || cloudStorage.status === 'full') && (
+        <div
+          className={`rounded-2xl border p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+            cloudStorage.status === 'full'
+              ? 'bg-rose-50 border-rose-300 text-rose-950'
+              : 'bg-amber-50 border-amber-300 text-amber-950'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle
+              className={`w-5 h-5 shrink-0 mt-0.5 ${
+                cloudStorage.status === 'full' ? 'text-rose-600' : 'text-amber-600'
+              }`}
+            />
+            <div className="space-y-1">
+              <p className="text-sm font-semibold">
+                {cloudStorage.status === 'full'
+                  ? `Peringatan: Penyimpanan File Firebase Sudah Penuh (${cloudStorage.usagePercent}%)`
+                  : `Pemberitahuan: Penyimpanan File Firebase Hampir Penuh (${cloudStorage.usagePercent}%)`}
+              </p>
+              <p className="text-xs opacity-90">
+                Terpakai{' '}
+                <span className="font-mono font-semibold">
+                  {formatBytes(cloudStorage.estimatedFirestoreBytes)}
+                </span>{' '}
+                dari kuota portal{' '}
+                <span className="font-mono font-semibold">{formatBytes(cloudStorage.quotaBytes)}</span>{' '}
+                ({cloudStorage.totalFiles} file tersimpan). Segera pilih dan hapus file karya/tugas lama agar pengunggahan siswa tetap lancar.
+              </p>
+            </div>
+          </div>
+          {tab !== 'database' && (
+            <button
+              type="button"
+              onClick={() => setTab('database')}
+              className={`px-4 py-2.5 text-xs font-semibold rounded-xl whitespace-nowrap shrink-0 text-white ${
+                cloudStorage.status === 'full'
+                  ? 'bg-rose-600 hover:bg-rose-700'
+                  : 'bg-amber-700 hover:bg-amber-800'
+              }`}
+            >
+              Kelola &amp; Hapus File
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Main Panel Container */}
       <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -1445,14 +1628,21 @@ export function AdminSection({
           <button
             type="button"
             onClick={() => setTab('database')}
-            className={`inline-flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+            className={`relative inline-flex items-center gap-2 px-4 py-3 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
               tab === 'database'
                 ? 'border-[#B91C1C] text-[#B91C1C] font-semibold'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
             }`}
           >
             <Database className="w-4 h-4" />
-            Database &amp; Backup
+            Database &amp; Penyimpanan
+            {cloudStorage && cloudStorage.status !== 'ok' && (
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  cloudStorage.status === 'full' ? 'bg-rose-600' : 'bg-amber-500'
+                }`}
+              />
+            )}
           </button>
         </div>
 
@@ -2861,17 +3051,344 @@ export function AdminSection({
 
           {tab === 'database' && (
             <div className="space-y-6">
+              {/* Cloud Firestore Storage Quota & Selective File Manager */}
+              <div className="border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-5 bg-white">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <HardDrive className="w-4 h-4 text-[#B91C1C]" />
+                      <h3 className="text-base font-semibold text-slate-900">
+                        Manajemen Penyimpanan File Cloud Firebase
+                      </h3>
+                      {cloudStorage && (
+                        <span
+                          className={`px-2.5 py-0.5 text-[11px] font-semibold rounded-full ${
+                            cloudStorage.status === 'full'
+                              ? 'bg-rose-100 text-rose-800'
+                              : cloudStorage.status === 'warning'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-emerald-100 text-emerald-800'
+                          }`}
+                        >
+                          {cloudStorage.status === 'full'
+                            ? 'Penuh (>=90%)'
+                            : cloudStorage.status === 'warning'
+                            ? 'Hampir Penuh (>=75%)'
+                            : 'Kapasitas Aman'}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-600">
+                      Memantau seluruh foto, video, dan file tugas LMS yang diunggah ke Cloud Firestore (tidak memakai Google Drive). Pilih file tertentu untuk dihapus bila ruang penyimpanan mulai penuh.
+                    </p>
+                  </div>
+                  {!isFirebaseAdmin && (
+                    <button
+                      type="button"
+                      disabled={connectingGoogleAdmin}
+                      onClick={handleConnectGoogleAdminForStorage}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-[#B91C1C] hover:bg-[#991B1B] text-white rounded-xl whitespace-nowrap shrink-0 disabled:opacity-60"
+                    >
+                      <Cloud className="w-3.5 h-3.5" />
+                      {connectingGoogleAdmin ? 'Menghubungkan...' : 'Hubungkan Google Admin untuk Hapus File'}
+                    </button>
+                  )}
+                </div>
+
+                {cloudStorage ? (
+                  <>
+                    {/* Quota Meter Bar */}
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-semibold text-slate-800">
+                          Terpakai: {formatBytes(cloudStorage.estimatedFirestoreBytes)} /{' '}
+                          {formatBytes(cloudStorage.quotaBytes)}{' '}
+                          <span className="font-mono text-slate-500">
+                            (Ukuran asli {formatBytes(cloudStorage.totalRawBytes)} · {cloudStorage.totalFiles} file)
+                          </span>
+                        </span>
+                        <span
+                          className={`font-mono font-bold tabular-nums ${
+                            cloudStorage.status === 'full'
+                              ? 'text-rose-700'
+                              : cloudStorage.status === 'warning'
+                              ? 'text-amber-700'
+                              : 'text-emerald-700'
+                          }`}
+                        >
+                          {cloudStorage.usagePercent}%
+                        </span>
+                      </div>
+                      <div className="w-full h-3 bg-slate-200 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            cloudStorage.status === 'full'
+                              ? 'bg-rose-600'
+                              : cloudStorage.status === 'warning'
+                              ? 'bg-amber-500'
+                              : 'bg-emerald-600'
+                          }`}
+                          style={{ width: `${Math.min(100, Math.max(2, cloudStorage.usagePercent))}%` }}
+                        />
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        Estimasi menghitung ekspansi Base64 (~1,35x) di Firestore agar aman di dalam batas gratis 1 GiB Spark. Peringatan muncul otomatis pada 75% dan status penuh pada 90%.
+                      </p>
+                    </div>
+
+                    {/* Filter & Quick-Select Controls */}
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                      <div className="flex flex-1 flex-wrap items-center gap-2">
+                        <div className="relative flex-1 min-w-[200px]">
+                          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={storageSearch}
+                            onChange={(e) => setStorageSearch(e.target.value)}
+                            placeholder="Cari nama file atau akun pengunggah..."
+                            className="w-full pl-9 pr-3 py-2 text-xs sm:text-sm border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                          />
+                        </div>
+                        <select
+                          value={storageTypeFilter}
+                          onChange={(e) =>
+                            setStorageTypeFilter(e.target.value as 'all' | 'image' | 'video' | 'other')
+                          }
+                          className="px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-xl"
+                        >
+                          <option value="all">Semua Tipe ({cloudStorage.files.length})</option>
+                          <option value="image">Gambar / Foto</option>
+                          <option value="video">Video</option>
+                          <option value="other">Dokumen / Lainnya</option>
+                        </select>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteMode('none');
+                            setSelectedFileIds(filteredStorageFiles.map((f) => f.fileId));
+                          }}
+                          disabled={filteredStorageFiles.length === 0}
+                          className="px-3 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 rounded-xl"
+                        >
+                          Pilih Semua ({filteredStorageFiles.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteMode('none');
+                            setSelectedFileIds(
+                              filteredStorageFiles
+                                .filter((f) => f.sizeBytes >= 1024 * 1024)
+                                .map((f) => f.fileId)
+                            );
+                          }}
+                          disabled={filteredStorageFiles.length === 0}
+                          className="px-3 py-2 text-xs font-medium bg-amber-50 hover:bg-amber-100 border border-amber-200 disabled:opacity-50 text-amber-900 rounded-xl"
+                        >
+                          Pilih &gt; 1 MB
+                        </button>
+                        {selectedFileIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmDeleteMode('none');
+                              setSelectedFileIds([]);
+                            }}
+                            className="px-3 py-2 text-xs font-medium bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-xl"
+                          >
+                            Batal Pilih
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Bulk Delete Confirmation Bar */}
+                    {selectedFileIds.length > 0 && (
+                      <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <p className="text-xs font-medium text-rose-900">
+                          <span className="font-semibold">{selectedFileIds.length} file dipilih</span> · Perkiraan ruang yang dibebaskan:{' '}
+                          <span className="font-mono font-semibold">{formatBytes(selectedEstimatedBytes)}</span>
+                        </p>
+                        {confirmDeleteMode === 'bulk' ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold text-rose-800">Hapus permanen?</span>
+                            <button
+                              type="button"
+                              disabled={deletingStorageFiles}
+                              onClick={handleBulkDeleteCloudFiles}
+                              className="px-3.5 py-1.5 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg disabled:opacity-60"
+                            >
+                              {deletingStorageFiles ? 'Menghapus...' : 'Ya, Hapus Terpilih'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deletingStorageFiles}
+                              onClick={() => setConfirmDeleteMode('none')}
+                              className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 text-slate-700 rounded-lg"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!isFirebaseAdmin) {
+                                onToast(
+                                  'Hubungkan akun Google Admin terlebih dahulu untuk menghapus file Cloud.',
+                                  'error'
+                                );
+                                return;
+                              }
+                              setConfirmDeleteMode('bulk');
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-xl self-start sm:self-auto"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Hapus Terpilih ({selectedFileIds.length})
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* File List */}
+                    {filteredStorageFiles.length === 0 ? (
+                      <div className="border border-slate-200 rounded-xl p-8 text-center text-xs sm:text-sm text-slate-500">
+                        {cloudStorage.files.length === 0
+                          ? 'Belum ada file media atau lampiran yang tersimpan di Cloud Firebase.'
+                          : 'Tidak ada file yang cocok dengan filter pencarian.'}
+                      </div>
+                    ) : (
+                      <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-[420px] overflow-y-auto">
+                        {filteredStorageFiles.map((file) => {
+                          const isChecked = selectedFileIds.includes(file.fileId);
+                          const isImg = file.mimeType.startsWith('image/');
+                          const isVid = file.mimeType.startsWith('video/');
+                          return (
+                            <div
+                              key={file.fileId}
+                              className={`p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                                isChecked ? 'bg-blue-50/50' : 'hover:bg-slate-50/70'
+                              }`}
+                            >
+                              <div className="flex items-start gap-3 min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleSelectFile(file.fileId)}
+                                  aria-label={`Pilih ${file.fileName}`}
+                                  className="mt-0.5 text-slate-500 hover:text-[#1D4ED8] shrink-0"
+                                >
+                                  {isChecked ? (
+                                    <CheckSquare className="w-4 h-4 text-[#1D4ED8]" />
+                                  ) : (
+                                    <Square className="w-4 h-4" />
+                                  )}
+                                </button>
+                                <div className="w-9 h-9 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-600 shrink-0">
+                                  {isImg ? (
+                                    <ImageIcon className="w-4 h-4 text-[#1D4ED8]" />
+                                  ) : isVid ? (
+                                    <Video className="w-4 h-4 text-[#B91C1C]" />
+                                  ) : (
+                                    <FileIcon className="w-4 h-4 text-slate-600" />
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-xs sm:text-sm font-medium text-slate-900 truncate">
+                                    {file.fileName}
+                                  </p>
+                                  <p className="text-[11px] text-slate-500 font-mono truncate">
+                                    {formatBytes(file.estimatedFirestoreBytes)} Cloud (asli {formatBytes(file.sizeBytes)}) · {file.chunkCount} bagian · Pengunggah: {file.uploaderUid} · {formatTimeAgo(file.createdAt)}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    downloadOrOpenMedia(
+                                      `${CLOUD_FILE_PREFIX}${file.fileId}`,
+                                      file.fileName
+                                    ).catch((err) =>
+                                      onToast(
+                                        err instanceof Error ? err.message : 'Gagal membuka file.',
+                                        'error'
+                                      )
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#1D4ED8] bg-blue-50 hover:bg-blue-100 rounded-lg"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                  Lihat
+                                </button>
+
+                                {confirmDeleteMode === file.fileId ? (
+                                  <div className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={deletingStorageFiles}
+                                      onClick={() => handleDeleteSingleCloudFile(file)}
+                                      className="px-2.5 py-1.5 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg"
+                                    >
+                                      {deletingStorageFiles ? '...' : 'Hapus'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={deletingStorageFiles}
+                                      onClick={() => setConfirmDeleteMode('none')}
+                                      className="px-2 py-1.5 text-xs font-medium bg-slate-100 text-slate-700 rounded-lg"
+                                    >
+                                      Batal
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (!isFirebaseAdmin) {
+                                        onToast(
+                                          'Hubungkan akun Google Admin terlebih dahulu untuk menghapus file Cloud.',
+                                          'error'
+                                        );
+                                        return;
+                                      }
+                                      setConfirmDeleteMode(file.fileId);
+                                    }}
+                                    title="Hapus file dari Cloud"
+                                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="p-6 text-center text-xs text-slate-500 border border-slate-200 rounded-xl">
+                    Memuat data penggunaan penyimpanan Cloud Firebase...
+                  </div>
+                )}
+              </div>
+
               {/* Cloud Firestore Cross-Device Sync Banner */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-blue-50/70 border border-blue-200 rounded-xl">
                 <div className="space-y-1">
                   <p className="text-sm font-semibold text-slate-900 flex items-center gap-2">
                     <Cloud className="w-4 h-4 text-[#1D4ED8]" />
-                    Cloud Firestore Real-Time Sync ({isFirebaseAdmin ? 'Terhubung Admin Google' : 'Belum Terhubung Google Admin'})
+                    Cloud Firestore Real-Time Sync ({isFirebaseAdmin ? 'Terhubung Admin Google' : 'Mode Pembina / Lokal'})
                   </p>
                   <p className="text-xs text-slate-600">
                     {isFirebaseAdmin
                       ? `Akun ${firebaseEmail || 'Admin Google'} aktif. Semua perubahan otomatis tersimpan di Cloud Firestore (${cloudSeeded ? 'Data Cloud Aktif' : 'Siap Disinkronkan'}) dan dapat diakses dari semua browser/perangkat.`
-                      : 'Masuk dengan Google (NedacisMC@gmail.com) agar perubahan tersimpan ke Cloud Firestore dan muncul di semua browser/perangkat.'}
+                      : 'Masuk dengan Google Admin (NedacisMC@gmail.com) untuk akses penuh pengaturan situs, PII siswa, dan penghapusan permanen file penyimpanan.'}
                   </p>
                 </div>
                 {onSyncCloudNow && isFirebaseAdmin && (

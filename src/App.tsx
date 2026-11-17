@@ -4,7 +4,6 @@ import {
   BookOpen,
   Calendar,
   ClipboardCheck,
-  Cloud,
   CreditCard,
   Home,
   Image as ImageIcon,
@@ -27,6 +26,7 @@ import type {
 } from './types';
 import { apiFetch, connectRealtimeSocket, getStoredToken, setStoredToken } from './lib/api';
 import { useFirebase } from './context/FirebaseContext';
+import { subscribeUploadedFilesAdmin, type CloudStorageSummary } from './lib/cloudFiles';
 import {
   deterministicNumericId,
   sanitizeDocId,
@@ -115,6 +115,7 @@ export default function App() {
     Array<{ id: number; firestoreId?: string; word: string }> | undefined
   >(undefined);
   const [cloudNotifications, setCloudNotifications] = useState<NotificationItem[] | null>(null);
+  const [cloudStorageSummary, setCloudStorageSummary] = useState<CloudStorageSummary | null>(null);
 
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -135,6 +136,7 @@ export default function App() {
     lmsTasks?: LmsTask[];
   } | null>(null);
   const autoSeedAttemptedRef = useRef(false);
+  const lastStorageAlertStatusRef = useRef<'ok' | 'warning' | 'full'>('ok');
   const [bootstrapReady, setBootstrapReady] = useState(false);
 
   const showToast = useCallback((message: string, variant: 'success' | 'error' | 'info' = 'info') => {
@@ -251,137 +253,9 @@ export default function App() {
     }
   }, [currentUser, loadNotifications, loadPendingCount]);
 
-  // Public Cloud Firestore real-time subscriptions (syncs across all devices/browsers)
-  useEffect(() => {
-    const unsubSettings = subscribeSiteSettings((settings) => {
-      if (settings) {
-        setCloudSeeded(true);
-        setCloudBranding(settings);
-        setLoading(false);
-      } else {
-        setCloudSeeded(false);
-        setCloudBranding(null);
-      }
-    });
-
-    const unsubNews = subscribeNewsArticles(isFirebaseAdmin, (articles) => {
-      setCloudNews(articles);
-    });
-
-    const unsubSchedules = subscribeSchedules(isFirebaseAdmin, (scheds) => {
-      setCloudSchedules(scheds);
-    });
-
-    const unsubMembers = subscribeMembersPublic(isFirebaseAdmin, (memList) => {
-      setCloudPublicMembers(memList);
-    });
-
-    const unsubWorks = subscribeWorks(isFirebaseAdmin, (workList) => {
-      setCloudWorks(workList);
-    });
-
-    return () => {
-      unsubSettings();
-      unsubNews();
-      unsubSchedules();
-      unsubMembers();
-      unsubWorks();
-    };
-  }, [isFirebaseAdmin]);
-
-  // Authenticated OR Cross-Device Member Cloud Firestore listeners
-  useEffect(() => {
-    if (firebaseUser?.uid) {
-      const uid = firebaseUser.uid;
-      const unsubAtt = subscribeAttendanceRecords(isFirebaseAdmin, uid, (records) => {
-        setCloudAttendance(records);
-      });
-
-      const unsubLms = subscribeLmsTasks(isFirebaseAdmin, uid, (tasks, adminTasks) => {
-        setCloudLmsTasks(tasks);
-        setCloudAdminTasks(isFirebaseAdmin ? adminTasks : undefined);
-      });
-
-      const unsubNotifs = subscribeNotificationsFirestore(isFirebaseAdmin, uid, (notifs) => {
-        setCloudNotifications(notifs);
-      });
-
-      return () => {
-        unsubAtt();
-        unsubLms();
-        unsubNotifs();
-      };
-    }
-
-    setCloudAttendance(null);
-    setCloudAdminTasks(undefined);
-    setCloudNotifications(null);
-
-    if (currentUser) {
-      const unsubLmsPublic = subscribeLmsTasks(false, '', (tasks) => {
-        setCloudLmsTasks(tasks);
-      });
-      return () => unsubLmsPublic();
-    }
-
-    setCloudLmsTasks(null);
-    return undefined;
-  }, [firebaseUser?.uid, isFirebaseAdmin, currentUser]);
-
-  // Admin-only Cloud Firestore listeners (PII NIS/NFC, Pending Works, Blocked Words)
-  useEffect(() => {
-    if (!firebaseUser?.uid || !isFirebaseAdmin) {
-      setPrivateMembersMap(new Map());
-      setCloudPendingWorks(undefined);
-      setCloudBlockedWords(undefined);
-      return;
-    }
-
-    const unsubPriv = subscribeMembersPrivateAdmin((map) => {
-      setPrivateMembersMap(map);
-    });
-    const unsubPending = subscribePendingWorksAdmin((pendingList) => {
-      setCloudPendingWorks(pendingList);
-    });
-    const unsubBlocked = subscribeBlockedWords((words) => {
-      setCloudBlockedWords(words);
-    });
-
-    return () => {
-      unsubPriv();
-      unsubPending();
-      unsubBlocked();
-    };
-  }, [firebaseUser?.uid, isFirebaseAdmin]);
-
-  // Auto-seed Cloud Firestore & ensure cross-device member auth hashes when Admin signs in with Google
-  useEffect(() => {
-    if (!firebaseAuthReady || !isFirebaseAdmin) return;
-    if (cloudSeeded) {
-      syncMemberAuthHashesAdmin().catch(() => {});
-      return;
-    }
-    if (!bootstrapReady || !bootstrapRef.current) {
-      return;
-    }
-    if (autoSeedAttemptedRef.current) return;
-    autoSeedAttemptedRef.current = true;
-
-    seedCloudPortalIfEmpty(bootstrapRef.current)
-      .then((didSeed) => {
-        if (didSeed) {
-          setCloudSeeded(true);
-          showToast('Database Cloud Firestore berhasil diinisialisasi & disinkronkan!', 'success');
-        }
-      })
-      .catch(() => {
-        autoSeedAttemptedRef.current = false;
-      });
-  }, [firebaseAuthReady, isFirebaseAdmin, cloudSeeded, bootstrapReady, showToast]);
-
   const handleSyncCloudNow = useCallback(async () => {
     if (!isFirebaseAdmin) {
-      showToast('Masuk dengan akun Google Admin (NedacisMC@gmail.com) untuk sinkronisasi cloud.', 'error');
+      showToast('Masuk dengan akun Google Admin (NedacisMC@gmail.com) untuk sinkronisasi awal cloud.', 'error');
       return;
     }
     const payload = bootstrapRef.current || {
@@ -422,11 +296,42 @@ export default function App() {
     });
   }, [rawMembers, privateMembersMap]);
 
-  const attendanceRecords = firebaseUser && cloudAttendance !== null ? cloudAttendance : localAttendance;
-  const lmsTasks = (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudLmsTasks : localLmsTasks;
-  const notifications = firebaseUser && cloudNotifications !== null ? cloudNotifications : localNotifications;
+  // Resolve member identity cleanly for both Username+ID sessions and Google Auth sessions
+  const resolvedMember = useMemo(() => {
+    if (currentUser) return currentUser;
+    if (!firebaseUser) return null;
+    const emailPrefix = (firebaseUser.email?.split('@')[0] || 'pengguna')
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '_');
+    return (
+      members.find(
+        (m) =>
+          (isFirebaseAdmin && m.role === 'admin' && m.show_in_members === 0) ||
+          m.username.toLowerCase() === emailPrefix
+      ) || null
+    );
+  }, [currentUser, firebaseUser, isFirebaseAdmin, members]);
+
+  const effectiveMemberDocId = useMemo(() => {
+    if (resolvedMember?.firestoreId?.startsWith('member_')) {
+      return resolvedMember.firestoreId;
+    }
+    if (resolvedMember?.username) {
+      return sanitizeDocId(`member_${resolvedMember.username}`);
+    }
+    return '';
+  }, [resolvedMember]);
+
+  const effectiveIsAdmin = resolvedMember?.role === 'admin' || isFirebaseAdmin;
+
+  const attendanceRecords =
+    (firebaseUser || currentUser) && cloudAttendance !== null ? cloudAttendance : localAttendance;
+  const lmsTasks =
+    (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudLmsTasks : localLmsTasks;
+  const notifications =
+    (firebaseUser || currentUser) && cloudNotifications !== null ? cloudNotifications : localNotifications;
   const pendingWorksCount =
-    isFirebaseAdmin && cloudPendingWorks !== undefined ? cloudPendingWorks.length : localPendingWorksCount;
+    effectiveIsAdmin && cloudPendingWorks !== undefined ? cloudPendingWorks.length : localPendingWorksCount;
 
   // Restore saved cross-device member login from localStorage once cloud members load
   useEffect(() => {
@@ -441,7 +346,176 @@ export default function App() {
     }
   }, [currentUser, members]);
 
-  // Synthesize effectiveUser from local session OR authenticated Firebase Google session
+  // Public Cloud Firestore real-time subscriptions (syncs across all devices/browsers)
+  useEffect(() => {
+    const unsubSettings = subscribeSiteSettings((settings) => {
+      if (settings) {
+        setCloudSeeded(true);
+        setCloudBranding(settings);
+        setLoading(false);
+      } else {
+        setCloudSeeded(false);
+        setCloudBranding(null);
+      }
+    });
+
+    const unsubNews = subscribeNewsArticles(effectiveIsAdmin, (articles) => {
+      setCloudNews(articles);
+    });
+
+    const unsubSchedules = subscribeSchedules(effectiveIsAdmin, (scheds) => {
+      setCloudSchedules(scheds);
+    });
+
+    const unsubMembers = subscribeMembersPublic(effectiveIsAdmin, (memList) => {
+      setCloudPublicMembers(memList);
+    });
+
+    const unsubWorks = subscribeWorks(effectiveIsAdmin, (workList) => {
+      setCloudWorks(workList);
+    });
+
+    return () => {
+      unsubSettings();
+      unsubNews();
+      unsubSchedules();
+      unsubMembers();
+      unsubWorks();
+    };
+  }, [effectiveIsAdmin]);
+
+  // Student, Pembina, and Google Auth real-time Cloud Firestore listeners (without requiring Google Sign-In)
+  useEffect(() => {
+    if (firebaseUser?.uid || effectiveMemberDocId) {
+      const uid = firebaseUser?.uid || '';
+      const unsubAtt = subscribeAttendanceRecords(
+        effectiveIsAdmin,
+        uid,
+        (records) => {
+          setCloudAttendance(records);
+        },
+        effectiveMemberDocId
+      );
+
+      const unsubLms = subscribeLmsTasks(
+        effectiveIsAdmin,
+        uid,
+        (tasks, adminTasks) => {
+          setCloudLmsTasks(tasks);
+          setCloudAdminTasks(effectiveIsAdmin ? adminTasks : undefined);
+        },
+        effectiveMemberDocId
+      );
+
+      const unsubNotifs = subscribeNotificationsFirestore(
+        effectiveIsAdmin,
+        uid,
+        (notifs) => {
+          setCloudNotifications(notifs);
+        },
+        effectiveMemberDocId
+      );
+
+      return () => {
+        unsubAtt();
+        unsubLms();
+        unsubNotifs();
+      };
+    }
+
+    setCloudAttendance(null);
+    setCloudAdminTasks(undefined);
+    setCloudNotifications(null);
+    setCloudLmsTasks(null);
+    return undefined;
+  }, [firebaseUser?.uid, effectiveIsAdmin, effectiveMemberDocId]);
+
+  // Admin & Pembina Cloud Firestore listeners (Pending Works, Blocked Words, Storage Monitor, and PII when Google Admin)
+  useEffect(() => {
+    if (!effectiveIsAdmin) {
+      setPrivateMembersMap(new Map());
+      setCloudPendingWorks(undefined);
+      setCloudBlockedWords(undefined);
+      setCloudStorageSummary(null);
+      lastStorageAlertStatusRef.current = 'ok';
+      return;
+    }
+
+    const unsubs: Array<() => void> = [];
+
+    if (firebaseUser?.uid && isFirebaseAdmin) {
+      unsubs.push(
+        subscribeMembersPrivateAdmin((map) => {
+          setPrivateMembersMap(map);
+        })
+      );
+    } else {
+      setPrivateMembersMap(new Map());
+    }
+
+    unsubs.push(
+      subscribePendingWorksAdmin((pendingList) => {
+        setCloudPendingWorks(pendingList);
+      })
+    );
+
+    unsubs.push(
+      subscribeBlockedWords((words) => {
+        setCloudBlockedWords(words);
+      })
+    );
+
+    unsubs.push(
+      subscribeUploadedFilesAdmin((summary) => {
+        setCloudStorageSummary(summary);
+        if (summary.status !== lastStorageAlertStatusRef.current) {
+          lastStorageAlertStatusRef.current = summary.status;
+          if (summary.status === 'full') {
+            showToast(
+              `Penyimpanan Cloud Firebase penuh (${summary.usagePercent}%). Hapus file lama di Panel Admin > Database & Penyimpanan.`,
+              'error'
+            );
+          } else if (summary.status === 'warning') {
+            showToast(
+              `Penyimpanan Cloud Firebase hampir penuh (${summary.usagePercent}%). Kelola file di Panel Admin > Database & Penyimpanan.`,
+              'info'
+            );
+          }
+        }
+      })
+    );
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [firebaseUser?.uid, isFirebaseAdmin, effectiveIsAdmin, showToast]);
+
+  // Auto-seed Cloud Firestore & ensure cross-device member auth hashes when Admin signs in with Google
+  useEffect(() => {
+    if (!firebaseAuthReady || !isFirebaseAdmin) return;
+    if (cloudSeeded) {
+      syncMemberAuthHashesAdmin().catch(() => {});
+      return;
+    }
+    if (!bootstrapReady || !bootstrapRef.current) {
+      return;
+    }
+    if (autoSeedAttemptedRef.current) return;
+    autoSeedAttemptedRef.current = true;
+
+    seedCloudPortalIfEmpty(bootstrapRef.current)
+      .then((didSeed) => {
+        if (didSeed) {
+          setCloudSeeded(true);
+          showToast('Database Cloud Firestore berhasil diinisialisasi & disinkronkan!', 'success');
+        }
+      })
+      .catch(() => {
+        autoSeedAttemptedRef.current = false;
+      });
+  }, [firebaseAuthReady, isFirebaseAdmin, cloudSeeded, bootstrapReady, showToast]);
+
+  // Synthesize effectiveUser from local/portal session OR authenticated Firebase Google session
   const effectiveUser = useMemo<StudentProfile | null>(() => {
     const cloudPoints = lmsTasks.reduce(
       (sum, t) => sum + (t.submission?.status === 'approved' ? t.submission.points_awarded || 0 : 0),
@@ -457,24 +531,19 @@ export default function App() {
             ? cloudPhotoUrl
             : '') ||
           '',
-        lms_points: firebaseUser && cloudLmsTasks !== null ? cloudPoints : currentUser.lms_points,
+        lms_points: (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudPoints : currentUser.lms_points,
       };
     }
     if (firebaseUser) {
       const emailPrefix = (firebaseUser.email?.split('@')[0] || 'pengguna')
         .toLowerCase()
         .replace(/[^a-z0-9._-]/g, '_');
-      const matched = members.find(
-        (m) =>
-          (isFirebaseAdmin && m.role === 'admin' && m.show_in_members === 0) ||
-          m.username.toLowerCase() === emailPrefix
-      );
-      if (matched) {
+      if (resolvedMember) {
         return {
-          ...matched,
-          role: isFirebaseAdmin ? 'admin' : matched.role,
-          avatar_url: matched.avatar_url || cloudPhotoUrl || firebaseUser.photoURL || '',
-          lms_points: cloudLmsTasks !== null ? cloudPoints : matched.lms_points,
+          ...resolvedMember,
+          role: isFirebaseAdmin ? 'admin' : resolvedMember.role,
+          avatar_url: resolvedMember.avatar_url || cloudPhotoUrl || firebaseUser.photoURL || '',
+          lms_points: cloudLmsTasks !== null ? cloudPoints : resolvedMember.lms_points,
         };
       }
       return {
@@ -497,9 +566,7 @@ export default function App() {
       };
     }
     return null;
-  }, [currentUser, firebaseUser, isFirebaseAdmin, cloudPhotoUrl, members, lmsTasks, cloudLmsTasks]);
-
-  const effectiveIsAdmin = effectiveUser?.role === 'admin' || isFirebaseAdmin;
+  }, [currentUser, firebaseUser, isFirebaseAdmin, cloudPhotoUrl, resolvedMember, lmsTasks, cloudLmsTasks]);
 
   // Hash routing for QR Code profile deep-linking (#profil/username)
   useEffect(() => {
@@ -747,18 +814,6 @@ export default function App() {
           <div className="flex items-center gap-2 shrink-0">
             {effectiveUser ? (
               <>
-                {!firebaseUser && (
-                  <button
-                    type="button"
-                    onClick={() => setLoginOpen(true)}
-                    title="Hubungkan Akun Google untuk Sinkronisasi Cloud"
-                    className="inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-white/95 bg-white/15 hover:bg-white/25 rounded-xl transition-colors min-h-[40px] whitespace-nowrap"
-                  >
-                    <Cloud className="w-4 h-4 shrink-0" />
-                    <span className="hidden lg:inline">Sync Cloud</span>
-                  </button>
-                )}
-
                 <button
                   type="button"
                   onClick={() => setNotifOpen(true)}
@@ -942,7 +997,7 @@ export default function App() {
                 members={members}
                 attendanceRecords={attendanceRecords}
                 currentUser={effectiveUser}
-                wsConnected={wsConnected || Boolean(firebaseUser)}
+                wsConnected={wsConnected || Boolean(firebaseUser || currentUser)}
                 onAttendanceRecorded={(rec) => {
                   setLatestAttendanceEvent(rec);
                   setLocalAttendance((prev) => {
@@ -967,6 +1022,9 @@ export default function App() {
                 cloudAdminTasks={cloudAdminTasks}
                 cloudPendingWorks={cloudPendingWorks}
                 cloudBlockedWords={cloudBlockedWords}
+                cloudStorage={cloudStorageSummary}
+                currentMemberId={effectiveMemberDocId || undefined}
+                isPortalAdmin={effectiveIsAdmin}
                 isFirebaseAdmin={isFirebaseAdmin}
                 firebaseEmail={firebaseUser?.email ?? null}
                 cloudSeeded={cloudSeeded}

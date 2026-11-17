@@ -110,15 +110,21 @@ export function AttendanceHub({
       let studentName = matched?.full_name || '';
       let studentKelas = matched?.kelas || '';
 
-      if (auth.currentUser && matched) {
+      if (matched) {
         const nowDate = new Date();
         const pad = (n: number) => String(n).padStart(2, '0');
         const attendanceDate = `${nowDate.getFullYear()}-${pad(nowDate.getMonth() + 1)}-${pad(nowDate.getDate())}`;
         const checkInTime = `${pad(nowDate.getHours())}:${pad(nowDate.getMinutes())}:${pad(nowDate.getSeconds())}`;
         const memberDocId = matched.firestoreId || sanitizeDocId(`member_${matched.username}`);
+        const recorderDocId = currentUser?.firestoreId?.startsWith('member_')
+          ? currentUser.firestoreId
+          : currentUser?.username
+          ? sanitizeDocId(`member_${currentUser.username}`)
+          : undefined;
 
         await recordAttendanceInFirestore({
           memberId: memberDocId,
+          studentUid: matched.owner_uid || '',
           fullName: matched.full_name,
           username: matched.username,
           kelas: matched.kelas,
@@ -129,6 +135,7 @@ export function AttendanceHub({
           status: finalStatus,
           sessionTitle,
           recordedBy: currentUser?.full_name || 'Pembina NMC',
+          recordedByUid: auth.currentUser?.uid || recorderDocId,
         });
 
         recordedRecord = {
@@ -186,13 +193,16 @@ export function AttendanceHub({
         time: recordedRecord.check_in_time,
       });
       onToast(
-        `${recordedRecord.full_name} (${recordedRecord.kelas}) tercatat ${recordedRecord.status} via ${method}.`,
+        `${recordedRecord.full_name} (${recordedRecord.kelas}) tercatat ${recordedRecord.status} via ${method} & tersinkron ke akun siswa.`,
         'success'
       );
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Kartu / QR tidak dikenali.', 'error');
     }
   };
+
+  const submitScanRef = useRef(submitScan);
+  submitScanRef.current = submitScan;
 
   // Global USB HID Keyboard Wedge capture when kioskListening is enabled on NFC tab
   useEffect(() => {
@@ -215,7 +225,7 @@ export function AttendanceHub({
         e.preventDefault();
         const captured = buffer;
         buffer = '';
-        submitScan(captured, 'NFC/RFID');
+        submitScanRef.current(captured, 'NFC/RFID');
       } else if (e.key.length === 1) {
         buffer += e.key;
       }
@@ -223,7 +233,7 @@ export function AttendanceHub({
 
     window.addEventListener('keydown', handleGlobalKey);
     return () => window.removeEventListener('keydown', handleGlobalKey);
-  }, [subTab, kioskListening, sessionTitle, scanStatusMode]);
+  }, [subTab, kioskListening]);
 
   // Web Serial API connection for Serial USB NFC/RFID Readers
   const handleConnectUsbSerial = async () => {
@@ -452,7 +462,7 @@ export function AttendanceHub({
       }
     };
 
-    if (getStoredToken() && !auth.currentUser) {
+    if (getStoredToken() && attendanceRecords.length === 0) {
       setLoadingReport(true);
       apiFetch<{ month: string; totalSessions: number; rows: MonthlyReportRow[] }>(
         `/api/attendance/monthly-report?month=${encodeURIComponent(reportMonth)}`
