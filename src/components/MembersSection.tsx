@@ -830,6 +830,8 @@ export function MembersSection({
                                   ? 'text-emerald-700'
                                   : row.status === 'Terlambat'
                                   ? 'text-amber-700'
+                                  : row.status === 'Tanpa Keterangan'
+                                  ? 'text-rose-700'
                                   : 'text-sky-700'
                               }
                             >

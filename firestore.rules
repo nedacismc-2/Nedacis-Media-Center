@@ -419,7 +419,7 @@ service cloud.firestore {
         && (!('checkOutTime' in data) || isStr(data.checkOutTime, 0, 20))
         && (data.method in ['NFC/RFID', 'QR Scan', 'Manual Admin'])
         && (!('checkOutMethod' in data) || data.checkOutMethod == '' || (data.checkOutMethod in ['NFC/RFID', 'QR Scan', 'Manual Admin']))
-        && (data.status in ['Hadir', 'Terlambat', 'Izin'])
+        && (data.status in ['Hadir', 'Terlambat', 'Izin', 'Tanpa Keterangan'])
         && isStr(data.sessionTitle, 1, 180)
         && isStr(data.recordedBy, 1, 120)
         && isStr(data.recordedByUid, 1, 128)

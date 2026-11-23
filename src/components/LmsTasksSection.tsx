@@ -6,7 +6,11 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock,
+  ExternalLink,
   FileText,
+  Film,
+  Image as ImageIcon,
+  Link2,
   Lock,
   PenLine,
   UploadCloud,
@@ -17,11 +21,14 @@ import { auth } from '../lib/firebase';
 import { uploadFileToCloud } from '../lib/cloudFiles';
 import {
   completeLmsStageInFirestore,
-  sanitizeDocId,
   submitLmsTaskInFirestore,
 } from '../lib/firestoreSync';
-import { formatDateID } from '../lib/mediaAssets';
-import { CloudFileAttachment } from './CloudMedia';
+import {
+  extractGoogleDriveFileId,
+  formatDateID,
+  normalizeWorkMediaUrl,
+} from '../lib/mediaAssets';
+import { CloudFileAttachment, CloudImage, CloudVideo } from './CloudMedia';
 
 interface LmsTasksSectionProps {
   currentUser: StudentProfile;
@@ -48,18 +55,20 @@ export function LmsTasksSection({
 
   const memberDocId = currentUser.firestoreId?.startsWith('member_')
     ? currentUser.firestoreId
-    : sanitizeDocId(`member_${currentUser.username}`);
-  const effectiveActorId = memberDocId.startsWith('member_')
-    ? memberDocId
-    : auth.currentUser?.uid || memberDocId;
+    : '';
+  const effectiveActorId = memberDocId || auth.currentUser?.uid || '';
 
   // Practice stage input
   const [practiceNotes, setPracticeNotes] = useState<Record<number, string>>({});
   const [completingStageId, setCompletingStageId] = useState<number | null>(null);
 
-  // Upload stage input
+  // Upload stage input (supports File upload or Google Drive / URL link)
+  const [uploadSourceMode, setUploadSourceMode] = useState<'file' | 'link'>('file');
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadPreviewUrl, setUploadPreviewUrl] = useState<string | null>(null);
+  const [submissionLinkUrl, setSubmissionLinkUrl] = useState('');
+  const [submissionLinkKind, setSubmissionLinkKind] = useState<'image' | 'video' | 'document'>('image');
+  const [submissionLinkPreviewError, setSubmissionLinkPreviewError] = useState(false);
   const [submissionNote, setSubmissionNote] = useState('');
   const [submittingTask, setSubmittingTask] = useState(false);
 
@@ -89,6 +98,10 @@ export function LmsTasksSection({
     setPracticeNotes(nextNotes);
     setSubmissionNote(selectedTask.submission?.submission_note || '');
     setUploadFile(null);
+    setUploadSourceMode('file');
+    setSubmissionLinkUrl('');
+    setSubmissionLinkKind('image');
+    setSubmissionLinkPreviewError(false);
     if (uploadPreviewUrl) {
       URL.revokeObjectURL(uploadPreviewUrl);
       setUploadPreviewUrl(null);
@@ -120,6 +133,26 @@ export function LmsTasksSection({
     }
   };
 
+  const handleSubmissionLinkUrlChange = (val: string) => {
+    setSubmissionLinkUrl(val);
+    setSubmissionLinkPreviewError(false);
+    const trimmed = val.trim().toLowerCase();
+    if (!trimmed) return;
+    if (/\.(mp4|webm|mov)(\?|$)/i.test(trimmed)) {
+      setSubmissionLinkKind('video');
+    } else if (
+      /docs\.google\.com|drive\.google\.com\/drive\/folders/i.test(trimmed) ||
+      /\.(pdf|doc|docx|ppt|pptx|xls|xlsx|zip|rar|txt)(\?|$)/i.test(trimmed)
+    ) {
+      setSubmissionLinkKind('document');
+    } else if (
+      extractGoogleDriveFileId(val) ||
+      /\.(jpg|jpeg|png|webp|gif|svg)(\?|$)/i.test(trimmed)
+    ) {
+      setSubmissionLinkKind('image');
+    }
+  };
+
   const handleCompleteStage = async (task: LmsTask, stage: LmsTaskStage) => {
     setCompletingStageId(stage.id);
     try {
@@ -132,7 +165,7 @@ export function LmsTasksSection({
             taskId: task.firestoreId,
             stageId: stage.firestoreId,
             responseText,
-            memberId: memberDocId,
+            memberId: memberDocId || undefined,
           });
           const nextProgress = [
             ...task.progress.filter((p) => p.stage_id !== stage.id),
@@ -188,8 +221,20 @@ export function LmsTasksSection({
       onToast('Tugas ini sudah disetujui Pembina dan tidak perlu diunggah ulang.', 'info');
       return;
     }
-    if (!uploadFile && !task.submission?.file_url) {
-      onToast('Silakan pilih file hasil tugas terlebih dahulu untuk diunggah.', 'error');
+
+    const useLink = uploadSourceMode === 'link';
+    const rawLink = submissionLinkUrl.trim();
+    if (useLink) {
+      if (!rawLink) {
+        onToast('Tempel tautan Google Drive atau URL hasil tugas terlebih dahulu.', 'error');
+        return;
+      }
+      if (!/^https?:\/\//i.test(rawLink)) {
+        onToast('Tautan harus diawali dengan https:// atau http://.', 'error');
+        return;
+      }
+    } else if (!uploadFile && !task.submission?.file_url) {
+      onToast('Silakan pilih file atau tautan Google Drive hasil tugas terlebih dahulu.', 'error');
       return;
     }
 
@@ -200,11 +245,42 @@ export function LmsTasksSection({
       let fileUrl = task.submission?.file_url || '';
       let fileName = uploadFile?.name || task.submission?.file_name || 'tugas-siswa';
       let fileType = uploadFile?.type || task.submission?.file_type || '';
+
+      if (useLink) {
+        const driveId = extractGoogleDriveFileId(rawLink);
+        fileUrl =
+          submissionLinkKind === 'document'
+            ? rawLink.slice(0, 500)
+            : normalizeWorkMediaUrl(rawLink, submissionLinkKind).slice(0, 500);
+        if (driveId) {
+          fileName =
+            submissionLinkKind === 'video'
+              ? 'Video Google Drive'
+              : submissionLinkKind === 'image'
+              ? 'Gambar Google Drive'
+              : 'Dokumen Google Drive';
+        } else {
+          try {
+            const parsed = new URL(rawLink);
+            const tail = parsed.pathname.split('/').filter(Boolean).pop();
+            fileName = tail && tail.length > 2 ? decodeURIComponent(tail).slice(0, 120) : parsed.hostname;
+          } catch {
+            fileName = 'Tautan Hasil Tugas';
+          }
+        }
+        fileType =
+          submissionLinkKind === 'video'
+            ? 'video/link'
+            : submissionLinkKind === 'image'
+            ? 'image/link'
+            : 'application/link';
+      }
+
       const uploadStage = task.stages.find((s) => s.stage_type === 'upload') || task.stages[task.stages.length - 1];
 
       if (cloudSeeded && task.firestoreId) {
         try {
-          if (uploadFile) {
+          if (!useLink && uploadFile) {
             const uploaded = await uploadFileToCloud(uploadFile, {
               isPublic: true,
               uploaderMemberId: effectiveActorId,
@@ -220,7 +296,7 @@ export function LmsTasksSection({
             fileName,
             fileType,
             submissionNote: submissionNote.trim(),
-            memberId: memberDocId,
+            memberId: memberDocId || undefined,
             fullName: currentUser.full_name,
             username: currentUser.username,
             kelas: currentUser.kelas,
@@ -233,7 +309,7 @@ export function LmsTasksSection({
               taskId: task.firestoreId,
               stageId: uploadStage.firestoreId,
               responseText: submissionNote.trim(),
-              memberId: memberDocId,
+              memberId: memberDocId || undefined,
             }).catch(() => {});
             nextProgress = [
               ...task.progress.filter((p) => p.stage_id !== uploadStage.id),
@@ -286,16 +362,31 @@ export function LmsTasksSection({
       }
 
       if (!updatedTask && getStoredToken()) {
-        const formData = new FormData();
-        if (uploadFile) formData.append('file', uploadFile);
-        formData.append('submissionNote', submissionNote.trim());
-        formData.append('task_title', task.title);
-        const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
-          method: 'POST',
-          body: formData,
-        });
-        updatedTask = res.task;
-        nextTotalPoints = res.totalPoints;
+        if (useLink) {
+          const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
+            method: 'POST',
+            body: JSON.stringify({
+              submissionNote: submissionNote.trim(),
+              task_title: task.title,
+              file_url: fileUrl,
+              file_name: fileName,
+              file_type: fileType,
+            }),
+          });
+          updatedTask = res.task;
+          nextTotalPoints = res.totalPoints;
+        } else {
+          const formData = new FormData();
+          if (uploadFile) formData.append('file', uploadFile);
+          formData.append('submissionNote', submissionNote.trim());
+          formData.append('task_title', task.title);
+          const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
+            method: 'POST',
+            body: formData,
+          });
+          updatedTask = res.task;
+          nextTotalPoints = res.totalPoints;
+        }
       }
 
       if (!updatedTask) {
@@ -304,6 +395,10 @@ export function LmsTasksSection({
 
       onTaskUpdated(updatedTask, nextTotalPoints);
       handleSelectUploadFile(null);
+      if (useLink) {
+        setSubmissionLinkUrl('');
+        setSubmissionLinkPreviewError(false);
+      }
       onToast(
         nextTotalPoints !== undefined
           ? `Tugas "${task.title}" berhasil diunggah! Anda memperoleh +${task.points_reward} Poin.`
@@ -755,33 +850,159 @@ export function LmsTasksSection({
                           </div>
                         ) : (
                           <form onSubmit={(e) => handleSubmitFinalTask(e, selectedTask)} className="space-y-4">
-                            <div>
-                              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                                {selectedTask.submission
-                                  ? 'Ganti / Unggah Ulang File Hasil Tugas (maks 15MB)'
-                                  : 'Upload File Hasil Tugas (Foto, Video, PDF, Dokumen, Audio, atau ZIP · maks 15MB)'}
-                              </label>
-                              <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
-                                <UploadCloud className="w-6 h-6 text-[#1D4ED8]" />
-                                <span className="text-xs font-medium text-slate-700 text-center">
-                                  {uploadFile
-                                    ? `${uploadFile.name} (${Math.max(1, Math.round(uploadFile.size / 1024))} KB)`
-                                    : 'Klik untuk memilih file hasil pengerjaan tugas'}
-                                </span>
-                                <input
-                                  type="file"
-                                  accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip"
-                                  className="hidden"
-                                  onChange={(e) => handleSelectUploadFile(e.target.files?.[0] || null)}
-                                />
-                              </label>
+                            <div className="space-y-3">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <label className="block text-xs font-semibold text-slate-700">
+                                  {selectedTask.submission
+                                    ? 'Ganti / Unggah Ulang Hasil Tugas'
+                                    : 'Sumber Hasil Tugas Akhir'}
+                                </label>
+                                <div className="inline-flex items-center p-1 bg-slate-100 rounded-xl">
+                                  <button
+                                    type="button"
+                                    onClick={() => setUploadSourceMode('file')}
+                                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                                      uploadSourceMode === 'file'
+                                        ? 'bg-white text-slate-900 shadow-sm'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    <UploadCloud className="w-3.5 h-3.5" />
+                                    Upload File
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setUploadSourceMode('link')}
+                                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                                      uploadSourceMode === 'link'
+                                        ? 'bg-white text-slate-900 shadow-sm'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    <Link2 className="w-3.5 h-3.5" />
+                                    Link Google Drive / URL
+                                  </button>
+                                </div>
+                              </div>
 
-                              {uploadPreviewUrl && uploadFile && (
-                                <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-52">
-                                  {uploadFile.type.startsWith('video/') ? (
-                                    <video src={uploadPreviewUrl} controls className="w-full max-h-52 object-contain" />
+                              {uploadSourceMode === 'file' ? (
+                                <>
+                                  <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
+                                    <div className="flex items-center gap-3 text-[#1D4ED8]">
+                                      <UploadCloud className="w-6 h-6" />
+                                      <ImageIcon className="w-5 h-5" />
+                                      <Film className="w-5 h-5" />
+                                    </div>
+                                    <span className="text-xs font-medium text-slate-700 text-center">
+                                      {uploadFile
+                                        ? `${uploadFile.name} (${Math.max(1, Math.round(uploadFile.size / 1024))} KB)`
+                                        : 'Klik untuk memilih file hasil tugas (Foto, Video, PDF, Dokumen, Audio, ZIP · maks 15MB)'}
+                                    </span>
+                                    <input
+                                      type="file"
+                                      accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip"
+                                      className="hidden"
+                                      onChange={(e) => handleSelectUploadFile(e.target.files?.[0] || null)}
+                                    />
+                                  </label>
+
+                                  {uploadPreviewUrl && uploadFile && (
+                                    <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-52">
+                                      {uploadFile.type.startsWith('video/') ? (
+                                        <video src={uploadPreviewUrl} controls className="w-full max-h-52 object-contain" />
+                                      ) : (
+                                        <img src={uploadPreviewUrl} alt="Pratinjau tugas" className="w-full max-h-52 object-cover" />
+                                      )}
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <div className="space-y-3 bg-slate-50 border border-slate-200 rounded-xl p-4">
+                                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                                    <div className="sm:col-span-8">
+                                      <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                                        Tautan Google Drive atau URL Hasil Tugas (HTTPS)
+                                      </label>
+                                      <input
+                                        type="url"
+                                        value={submissionLinkUrl}
+                                        onChange={(e) => handleSubmissionLinkUrlChange(e.target.value)}
+                                        placeholder="https://drive.google.com/file/d/.../view?usp=sharing"
+                                        className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                                      />
+                                    </div>
+                                    <div className="sm:col-span-4">
+                                      <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                                        Jenis Lampiran
+                                      </label>
+                                      <select
+                                        value={submissionLinkKind}
+                                        onChange={(e) => {
+                                          setSubmissionLinkKind(e.target.value as 'image' | 'video' | 'document');
+                                          setSubmissionLinkPreviewError(false);
+                                        }}
+                                        className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                                      >
+                                        <option value="image">Foto / Gambar</option>
+                                        <option value="video">Video</option>
+                                        <option value="document">Dokumen / Folder / Lainnya</option>
+                                      </select>
+                                    </div>
+                                  </div>
+
+                                  {extractGoogleDriveFileId(submissionLinkUrl) ? (
+                                    <p className="flex items-start gap-1.5 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                                      <span>
+                                        Link Google Drive terdeteksi. Pastikan izin file di Google Drive diatur ke{' '}
+                                        <strong>Siapa saja yang memiliki link (Viewer)</strong> agar gambar/hasil tugas muncul otomatis.
+                                      </span>
+                                    </p>
                                   ) : (
-                                    <img src={uploadPreviewUrl} alt="Pratinjau tugas" className="w-full max-h-52 object-cover" />
+                                    <p className="text-[11px] text-slate-500">
+                                      Tempel link berbagi dari Google Drive (foto, video, PDF, Docs, folder) atau URL HTTPS langsung.
+                                    </p>
+                                  )}
+
+                                  {submissionLinkUrl.trim() && /^https?:\/\//i.test(submissionLinkUrl.trim()) && (
+                                    <div className="space-y-1.5">
+                                      <p className="text-[11px] font-medium text-slate-600">Pratinjau Otomatis:</p>
+                                      {submissionLinkKind === 'document' ? (
+                                        <a
+                                          href={submissionLinkUrl.trim()}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="flex items-center justify-between gap-2 px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-[#1D4ED8] hover:bg-slate-50"
+                                        >
+                                          <span className="truncate">{submissionLinkUrl.trim()}</span>
+                                          <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                                        </a>
+                                      ) : (
+                                        <div className="rounded-xl overflow-hidden border border-slate-200 bg-white max-h-52 flex items-center justify-center">
+                                          {submissionLinkKind === 'video' ? (
+                                            <CloudVideo
+                                              src={normalizeWorkMediaUrl(submissionLinkUrl, 'video')}
+                                              controls
+                                              className="w-full max-h-52 object-contain"
+                                            />
+                                          ) : (
+                                            <CloudImage
+                                              src={normalizeWorkMediaUrl(submissionLinkUrl, 'image')}
+                                              alt="Pratinjau tautan hasil tugas"
+                                              className="w-full max-h-52 object-contain"
+                                              onImageLoadSuccess={() => setSubmissionLinkPreviewError(false)}
+                                              onImageLoadFailed={() => setSubmissionLinkPreviewError(true)}
+                                            />
+                                          )}
+                                        </div>
+                                      )}
+                                      {submissionLinkPreviewError && submissionLinkKind === 'image' && (
+                                        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                                          Gambar belum dapat dimuat di pratinjau. Pastikan akses link di Google Drive diatur ke{' '}
+                                          <strong>Siapa saja yang memiliki link</strong> atau ubah Jenis Lampiran ke Dokumen/Video bila bukan gambar.
+                                        </p>
+                                      )}
+                                    </div>
                                   )}
                                 </div>
                               )}

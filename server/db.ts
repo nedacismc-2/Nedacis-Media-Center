@@ -241,7 +241,7 @@ export function initDatabase() {
       attendance_date TEXT NOT NULL,
       check_in_time TEXT NOT NULL,
       method TEXT NOT NULL CHECK(method IN ('NFC/RFID', 'QR Scan', 'Manual Admin')),
-      status TEXT NOT NULL CHECK(status IN ('Hadir', 'Terlambat', 'Izin')),
+      status TEXT NOT NULL CHECK(status IN ('Hadir', 'Terlambat', 'Izin', 'Tanpa Keterangan')),
       session_title TEXT NOT NULL,
       recorded_by TEXT NOT NULL,
       created_at TEXT NOT NULL,
@@ -345,6 +345,49 @@ export function initDatabase() {
   }
   if (!attCols.some((c) => c.name === 'wa_notified_out')) {
     db.exec(`ALTER TABLE attendance_records ADD COLUMN wa_notified_out INTEGER NOT NULL DEFAULT 0`);
+  }
+  const attSchemaRow = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attendance_records'`)
+    .get() as { sql?: string } | undefined;
+  if (attSchemaRow?.sql && !attSchemaRow.sql.includes('Tanpa Keterangan')) {
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          ALTER TABLE attendance_records RENAME TO attendance_records_legacy_status;
+          CREATE TABLE attendance_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            attendance_date TEXT NOT NULL,
+            check_in_time TEXT NOT NULL,
+            method TEXT NOT NULL CHECK(method IN ('NFC/RFID', 'QR Scan', 'Manual Admin')),
+            status TEXT NOT NULL CHECK(status IN ('Hadir', 'Terlambat', 'Izin', 'Tanpa Keterangan')),
+            session_title TEXT NOT NULL,
+            recorded_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            check_out_time TEXT NOT NULL DEFAULT '',
+            check_out_method TEXT NOT NULL DEFAULT '',
+            wa_notified_in INTEGER NOT NULL DEFAULT 0,
+            wa_notified_out INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (user_id, attendance_date)
+          );
+          INSERT INTO attendance_records (
+            id, user_id, attendance_date, check_in_time, method, status,
+            session_title, recorded_by, created_at,
+            check_out_time, check_out_method, wa_notified_in, wa_notified_out
+          )
+          SELECT
+            id, user_id, attendance_date, check_in_time, method, status,
+            session_title, recorded_by, created_at,
+            check_out_time, check_out_method, wa_notified_in, wa_notified_out
+          FROM attendance_records_legacy_status;
+          DROP TABLE attendance_records_legacy_status;
+          CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance_records(attendance_date);
+        `);
+      })();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
   }
   const workCols = db.prepare(`PRAGMA table_info(works)`).all() as Array<{ name: string }>;
   if (!workCols.some((c) => c.name === 'approval_status')) {

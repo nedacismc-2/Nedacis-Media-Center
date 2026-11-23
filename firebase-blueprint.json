@@ -216,7 +216,7 @@
         "checkOutTime": { "type": "string", "maxLength": 20 },
         "method": { "type": "string", "enum": ["NFC/RFID", "QR Scan", "Manual Admin"] },
         "checkOutMethod": { "type": "string", "maxLength": 30 },
-        "status": { "type": "string", "enum": ["Hadir", "Terlambat", "Izin"] },
+        "status": { "type": "string", "enum": ["Hadir", "Terlambat", "Izin", "Tanpa Keterangan"] },
         "sessionTitle": { "type": "string", "minLength": 1, "maxLength": 180 },
         "recordedBy": { "type": "string", "minLength": 1, "maxLength": 120 },
         "recordedByUid": { "type": "string", "minLength": 1, "maxLength": 128 },

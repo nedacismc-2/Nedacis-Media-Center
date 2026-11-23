@@ -5,7 +5,7 @@ import {
   resolveCloudFile,
   downloadOrOpenMedia,
 } from '../lib/cloudFiles';
-import { getGoogleDriveImageCandidates, resolveMediaUrl } from '../lib/mediaAssets';
+import { extractGoogleDriveFileId, getGoogleDriveImageCandidates, resolveMediaUrl } from '../lib/mediaAssets';
 
 export function useResolvedMedia(rawUrl?: string | null) {
   const [state, setState] = useState<{
@@ -199,10 +199,9 @@ export function CloudFileAttachment({
   const effectiveName = fileName || cloudName || 'lampiran';
   const effectiveMime = fileType || mimeType || '';
 
-  const isImg =
-    effectiveMime.startsWith('image/') ||
-    /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(effectiveName) ||
-    /\.(jpg|jpeg|png|webp|gif|svg)(\?|$)/i.test(url);
+  const hasDriveId = Boolean(extractGoogleDriveFileId(url));
+  const isLocalUploadOrCloud = isCloudFileUrl(url) || url.startsWith('/uploads/');
+
   const isVid =
     effectiveMime.startsWith('video/') ||
     /\.(mp4|webm|mov)$/i.test(effectiveName) ||
@@ -211,6 +210,13 @@ export function CloudFileAttachment({
     effectiveMime.startsWith('audio/') ||
     /\.(mp3|wav|ogg|m4a)$/i.test(effectiveName) ||
     /\.(mp3|wav|ogg|m4a)(\?|$)/i.test(url);
+  const isImg =
+    !isVid &&
+    !isAud &&
+    (effectiveMime.startsWith('image/') ||
+      /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(effectiveName) ||
+      /\.(jpg|jpeg|png|webp|gif|svg)(\?|$)/i.test(url) ||
+      (hasDriveId && effectiveMime !== 'application/link'));
 
   const handleOpen = (e: React.MouseEvent) => {
     if (isCloudFileUrl(url)) {
@@ -221,16 +227,16 @@ export function CloudFileAttachment({
 
   return (
     <div className="space-y-2">
-      {showPreview && src && isImg && (
-        <img
-          src={src}
+      {showPreview && isImg && (
+        <CloudImage
+          src={url}
           alt={title || effectiveName}
           className="max-h-64 rounded-lg object-contain border border-slate-200 bg-white"
         />
       )}
-      {showPreview && src && isVid && (
-        <video
-          src={src}
+      {showPreview && isVid && (
+        <CloudVideo
+          src={url}
           controls
           className="w-full max-h-64 rounded-lg border border-slate-200 bg-black"
         />
@@ -240,7 +246,7 @@ export function CloudFileAttachment({
       )}
       <a
         href={src || url}
-        download={effectiveName}
+        {...(isLocalUploadOrCloud ? { download: effectiveName } : {})}
         target="_blank"
         rel="noopener noreferrer"
         onClick={handleOpen}

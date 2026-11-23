@@ -339,17 +339,20 @@ export function AdminSection({
   }, [canWriteCloudAdmin, cloudPendingWorks]);
 
   const loadAdminTasks = useCallback(async () => {
-    if (canWriteCloudAdmin && cloudAdminTasks) {
+    if (canWriteCloudAdmin && cloudAdminTasks && cloudAdminTasks.length > 0) {
       setAdminTasks(cloudAdminTasks);
       return;
     }
-    if (!getStoredToken()) return;
+    if (!getStoredToken()) {
+      if (cloudAdminTasks) setAdminTasks(cloudAdminTasks);
+      return;
+    }
     setLoadingTasks(true);
     try {
       const res = await apiFetch<{ tasks: AdminLmsTask[] }>('/api/admin/tasks');
       setAdminTasks(res.tasks);
     } catch {
-      // ignore
+      if (cloudAdminTasks) setAdminTasks(cloudAdminTasks);
     } finally {
       setLoadingTasks(false);
     }
@@ -363,7 +366,7 @@ export function AdminSection({
   }, [canWriteCloudAdmin, cloudPendingWorks]);
 
   useEffect(() => {
-    if (canWriteCloudAdmin && cloudAdminTasks) {
+    if (canWriteCloudAdmin && cloudAdminTasks && cloudAdminTasks.length > 0) {
       setAdminTasks(cloudAdminTasks);
     }
   }, [canWriteCloudAdmin, cloudAdminTasks]);
@@ -766,7 +769,9 @@ export function AdminSection({
         await deleteStudentFromFirestore(fId);
       }
       if (getStoredToken()) {
-        await apiFetch(`/api/admin/students/${student.id}`, { method: 'DELETE' }).catch(() => {});
+        await apiFetch(`/api/admin/students/${student.id}`, { method: 'DELETE' }).catch((err) => {
+          if (!(auth.currentUser && isFirebaseAdmin)) throw err;
+        });
       }
       onMembersChanged();
       onToast(`Akun ${student.full_name} dihapus dari daftar peserta.`, 'info');
@@ -1351,46 +1356,50 @@ export function AdminSection({
     try {
       let createdTask: AdminLmsTask | null = null;
       if (auth.currentUser || canWriteCloudAdmin) {
-        const fId = await createLmsTaskInFirestore({
-          title: taskTitle.trim(),
-          description: taskDesc.trim(),
-          division: taskDivision,
-          pointsReward: Number(taskPoints) || 100,
-          dueDate: taskDueDate,
-          creatorName: 'Pembina NMC',
-          createdByMemberId: currentMemberId,
-          stages: draftStages.map((s) => ({
-            stage_type: s.stage_type,
-            title: s.title,
-            content: s.content,
-            attachment_url: s.attachment_url,
-          })),
-        });
-        const taskNumId = Date.now();
-        createdTask = {
-          id: taskNumId,
-          firestoreId: fId,
-          title: taskTitle.trim(),
-          description: taskDesc.trim(),
-          division: taskDivision,
-          points_reward: Number(taskPoints) || 100,
-          due_date: taskDueDate,
-          is_published: 1,
-          created_by: 0,
-          creator_name: 'Pembina NMC',
-          created_at: new Date().toISOString(),
-          stages: draftStages.map((s, idx) => ({
-            id: taskNumId + idx + 1,
-            task_id: taskNumId,
-            stage_order: idx + 1,
-            stage_type: s.stage_type,
-            title: s.title,
-            content: s.content,
-            attachment_url: s.attachment_url,
+        try {
+          const fId = await createLmsTaskInFirestore({
+            title: taskTitle.trim(),
+            description: taskDesc.trim(),
+            division: taskDivision,
+            pointsReward: Number(taskPoints) || 100,
+            dueDate: taskDueDate,
+            creatorName: 'Pembina NMC',
+            createdByMemberId: currentMemberId,
+            stages: draftStages.map((s) => ({
+              stage_type: s.stage_type,
+              title: s.title,
+              content: s.content,
+              attachment_url: s.attachment_url,
+            })),
+          });
+          const taskNumId = Date.now();
+          createdTask = {
+            id: taskNumId,
+            firestoreId: fId,
+            title: taskTitle.trim(),
+            description: taskDesc.trim(),
+            division: taskDivision,
+            points_reward: Number(taskPoints) || 100,
+            due_date: taskDueDate,
+            is_published: 1,
+            created_by: 0,
+            creator_name: 'Pembina NMC',
             created_at: new Date().toISOString(),
-          })),
-          submissions: [],
-        };
+            stages: draftStages.map((s, idx) => ({
+              id: taskNumId + idx + 1,
+              task_id: taskNumId,
+              stage_order: idx + 1,
+              stage_type: s.stage_type,
+              title: s.title,
+              content: s.content,
+              attachment_url: s.attachment_url,
+              created_at: new Date().toISOString(),
+            })),
+            submissions: [],
+          };
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
       if (getStoredToken()) {
         const res = await apiFetch<{ task: AdminLmsTask }>('/api/admin/tasks', {
@@ -1434,7 +1443,11 @@ export function AdminSection({
   const handleDeleteLmsTask = async (task: AdminLmsTask) => {
     try {
       if ((auth.currentUser || canWriteCloudAdmin) && task.firestoreId) {
-        await deleteLmsTaskInFirestore(task.firestoreId);
+        try {
+          await deleteLmsTaskInFirestore(task.firestoreId);
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
       if (getStoredToken()) {
         await apiFetch(`/api/admin/tasks/${task.id}`, { method: 'DELETE' }).catch(() => {});
@@ -1910,7 +1923,13 @@ export function AdminSection({
                     <div className="flex items-start gap-2">
                       <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                       <span>
-                        Untuk menyinkronkan hasil import &amp; penimpaan data anggota ke Cloud Firestore lintas perangkat, hubungkan akun Google Admin (<span className="font-mono font-semibold">NedacisMC@gmail.com</span>).
+                        {getStoredToken()
+                          ? 'Import & penimpaan data anggota tersimpan ke server lokal Pembina. Hubungkan Google Admin ('
+                          : 'Untuk menyinkronkan hasil import & penimpaan data anggota ke Cloud Firestore lintas perangkat, hubungkan akun Google Admin ('}
+                        <span className="font-mono font-semibold">NedacisMC@gmail.com</span>
+                        {getStoredToken()
+                          ? ') bila ingin langsung menyinkronkan ke Cloud Firestore.'
+                          : ').'}
                       </span>
                     </div>
                     <button

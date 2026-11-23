@@ -89,7 +89,7 @@ export function AttendanceHub({
 }: AttendanceHubProps) {
   const [subTab, setSubTab] = useState<HubTab>('nfc');
   const [sessionTitle, setSessionTitle] = useState('Pertemuan Rutin Nedacis Media Center');
-  const [scanStatusMode, setScanStatusMode] = useState<'Hadir' | 'Terlambat' | 'Izin'>('Hadir');
+  const [scanStatusMode, setScanStatusMode] = useState<'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan'>('Hadir');
   const [attendanceMode, setAttendanceMode] = useState<AttendanceMode>('auto');
   const [autoQueueWa, setAutoQueueWa] = useState(true);
   const [gatewayConfigured, setGatewayConfigured] = useState(false);
@@ -177,7 +177,7 @@ export function AttendanceHub({
   const submitScan = async (
     code: string,
     method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin',
-    statusOverride?: 'Hadir' | 'Terlambat' | 'Izin'
+    statusOverride?: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan'
   ) => {
     const clean = code.trim();
     if (!clean) return;
@@ -242,9 +242,9 @@ export function AttendanceHub({
           ? sanitizeDocId(`member_${currentUser.username}`)
           : undefined;
         effectiveRecorderUid =
-          (isFirebaseAdmin ? auth.currentUser?.uid : undefined) ||
-          recorderDocId ||
-          auth.currentUser?.uid;
+          isFirebaseAdmin && auth.currentUser?.uid
+            ? auth.currentUser.uid
+            : recorderDocId || auth.currentUser?.uid;
 
         try {
           const cloudRes = await recordAttendanceInFirestore({
@@ -667,15 +667,18 @@ export function AttendanceHub({
       const students = members.filter((m) => m.role === 'student');
       const rows: MonthlyReportRow[] = students.map((st) => {
         const recs = monthRecs.filter(
-          (r) => r.username === st.username || r.user_id === st.id
+          (r) =>
+            r.username.toLowerCase() === st.username.toLowerCase() ||
+            (st.id > 0 && r.user_id === st.id)
         );
         const hadir = recs.filter((r) => r.status === 'Hadir').length;
         const terlambat = recs.filter((r) => r.status === 'Terlambat').length;
         const izin = recs.filter((r) => r.status === 'Izin').length;
+        const tanpaKeterangan = recs.filter((r) => r.status === 'Tanpa Keterangan').length;
         const pulangCount = recs.filter((r) => Boolean(r.check_out_time && r.check_out_time.trim())).length;
-        const attended = hadir + terlambat + izin;
-        const alpha = Math.max(0, totalSessions - attended);
-        const rate = Math.min(100, Math.round(((hadir + terlambat) / totalSessions) * 100));
+        const attended = hadir + terlambat;
+        const alpha = Math.max(tanpaKeterangan, uniqueDates.size - (attended + izin));
+        const rate = uniqueDates.size === 0 ? 0 : Math.min(100, Math.round((attended / totalSessions) * 100));
         return {
           user_id: st.id,
           full_name: st.full_name,
@@ -684,7 +687,7 @@ export function AttendanceHub({
           kelas: st.kelas,
           division: st.division,
           parent_whatsapp: st.parent_whatsapp || '',
-          total_sessions: totalSessions,
+          total_sessions: uniqueDates.size,
           hadir_count: hadir,
           terlambat_count: terlambat,
           izin_count: izin,
@@ -729,24 +732,40 @@ export function AttendanceHub({
     setDeletingKey(rowKey);
     try {
       let deletedCloud = false;
+      const actorPembinaId =
+        currentUser?.role === 'admin'
+          ? currentUser.firestoreId?.startsWith('member_')
+            ? currentUser.firestoreId
+            : currentUser.username
+            ? sanitizeDocId(`member_${currentUser.username}`)
+            : undefined
+          : undefined;
       if (rec.firestoreId) {
         try {
-          await deleteAttendanceInFirestore(rec.firestoreId);
+          await deleteAttendanceInFirestore(rec.firestoreId, actorPembinaId);
           deletedCloud = true;
         } catch (err) {
           const msg = err instanceof Error ? err.message : '';
-          if (msg.includes('Missing or insufficient permissions') || msg.includes('PERMISSION_DENIED')) {
+          const isPerm =
+            msg.includes('Missing or insufficient permissions') || msg.includes('PERMISSION_DENIED');
+          if (isPerm && !getStoredToken()) {
             throw new Error(
               'Tidak memiliki izin menghapus log ini di Firebase. Login dengan Google Admin untuk menghapus log buatan Admin.'
             );
           }
-          throw err;
+          if (!isPerm) throw err;
         }
       }
 
-      if (getStoredToken() && rec.id > 0) {
+      if (getStoredToken()) {
+        const deleteParams = new URLSearchParams({
+          username: rec.username || '',
+          date: rec.attendance_date || '',
+        });
         try {
-          await apiFetch(`/api/attendance/${rec.id}`, { method: 'DELETE' });
+          await apiFetch(`/api/attendance/${rec.id || 0}?${deleteParams.toString()}`, {
+            method: 'DELETE',
+          });
         } catch (err) {
           const msg = err instanceof Error ? err.message.toLowerCase() : '';
           const notFoundInLocal = msg.includes('tidak ditemukan') || msg.includes('404');
@@ -878,8 +897,11 @@ export function AttendanceHub({
   const renderScannedBanner = () => {
     if (!lastScannedBanner) return null;
     const isCheckOut = lastScannedBanner.actionType === 'check_out';
+    const isTanpaKeterangan = !isCheckOut && lastScannedBanner.status === 'Tanpa Keterangan';
     const wrapperClasses = isCheckOut
       ? 'p-4 bg-indigo-50 border border-indigo-200 rounded-xl space-y-3'
+      : isTanpaKeterangan
+      ? 'p-4 bg-rose-50 border border-rose-200 rounded-xl space-y-3'
       : 'p-4 bg-emerald-50 border border-emerald-200 rounded-xl space-y-3';
 
     return (
@@ -889,24 +911,34 @@ export function AttendanceHub({
             {isCheckOut ? (
               <LogOut className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
             ) : (
-              <LogIn className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              <LogIn className={`w-5 h-5 shrink-0 mt-0.5 ${isTanpaKeterangan ? 'text-rose-600' : 'text-emerald-600'}`} />
             )}
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <p className={`text-sm font-semibold ${isCheckOut ? 'text-indigo-950' : 'text-emerald-950'}`}>
+                <p
+                  className={`text-sm font-semibold ${
+                    isCheckOut ? 'text-indigo-950' : isTanpaKeterangan ? 'text-rose-950' : 'text-emerald-950'
+                  }`}
+                >
                   {lastScannedBanner.name} ({lastScannedBanner.kelas})
                 </p>
                 <span
                   className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
                     isCheckOut
                       ? 'bg-indigo-100 text-indigo-800'
+                      : isTanpaKeterangan
+                      ? 'bg-rose-100 text-rose-800'
                       : 'bg-emerald-100 text-emerald-800'
                   }`}
                 >
-                  {isCheckOut ? 'ABSEN PULANG' : 'ABSEN MASUK'}
+                  {isCheckOut ? 'ABSEN PULANG' : isTanpaKeterangan ? 'TANPA KETERANGAN' : 'ABSEN MASUK'}
                 </span>
               </div>
-              <p className={`text-xs font-mono tabular-nums mt-0.5 ${isCheckOut ? 'text-indigo-800' : 'text-emerald-800'}`}>
+              <p
+                className={`text-xs font-mono tabular-nums mt-0.5 ${
+                  isCheckOut ? 'text-indigo-800' : isTanpaKeterangan ? 'text-rose-800' : 'text-emerald-800'
+                }`}
+              >
                 {lastScannedBanner.status} · {lastScannedBanner.method} · Masuk {lastScannedBanner.checkInTime}
                 {lastScannedBanner.checkOutTime ? ` · Pulang ${lastScannedBanner.checkOutTime}` : ''} {localTzLabel}
               </p>
@@ -1072,12 +1104,17 @@ export function AttendanceHub({
               <label className="block text-xs font-medium text-slate-600 mb-1.5">Status Kehadiran</label>
               <select
                 value={scanStatusMode}
-                onChange={(e) => setScanStatusMode(e.target.value as 'Hadir' | 'Terlambat' | 'Izin')}
+                onChange={(e) =>
+                  setScanStatusMode(
+                    e.target.value as 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan'
+                  )
+                }
                 className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:bg-white focus:border-[#1D4ED8]"
               >
                 <option value="Hadir">Hadir (Tepat Waktu)</option>
                 <option value="Terlambat">Terlambat</option>
                 <option value="Izin">Izin</option>
+                <option value="Tanpa Keterangan">Tanpa Keterangan</option>
               </select>
             </div>
           </div>
@@ -1217,6 +1254,10 @@ export function AttendanceHub({
                             Kelas {m.kelas} ·{' '}
                             {hasOut ? (
                               <span className="text-indigo-700 font-medium">Pulang {todayRec?.check_out_time}</span>
+                            ) : todayRec?.status === 'Tanpa Keterangan' ? (
+                              <span className="text-rose-700 font-medium">Tanpa Keterangan</span>
+                            ) : todayRec?.status === 'Izin' ? (
+                              <span className="text-sky-700 font-medium">Izin</span>
                             ) : hasIn ? (
                               <span className="text-emerald-700 font-medium">Masuk {todayRec?.check_in_time}</span>
                             ) : (
@@ -1306,6 +1347,8 @@ export function AttendanceHub({
                               ? 'text-emerald-700'
                               : rec.status === 'Terlambat'
                               ? 'text-amber-700'
+                              : rec.status === 'Tanpa Keterangan'
+                              ? 'text-rose-700'
                               : 'text-sky-700'
                           }`}
                         >

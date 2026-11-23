@@ -47,6 +47,8 @@ import {
   subscribeSiteSettings,
   subscribeWorks,
   syncMemberAuthHashesAdmin,
+  syncMissingLmsTasksToFirestore,
+  syncMissingMembersToFirestore,
 } from './lib/firestoreSync';
 
 const PORTAL_MEMBER_STORAGE_KEY = 'mmc_portal_member_username';
@@ -146,6 +148,9 @@ export default function App() {
     lmsTasks?: LmsTask[];
   } | null>(null);
   const autoSeedAttemptedRef = useRef(false);
+  const lmsMissingSyncAttemptedRef = useRef(false);
+  const missingMembersSyncSigRef = useRef('');
+  const deletedAttendanceKeysRef = useRef<Set<string>>(new Set());
   const lastStorageAlertStatusRef = useRef<'ok' | 'warning' | 'full'>('ok');
   const [bootstrapReady, setBootstrapReady] = useState(false);
 
@@ -263,6 +268,9 @@ export default function App() {
   useEffect(() => {
     if (currentUser) {
       loadNotifications();
+      if (getStoredToken()) {
+        loadLmsTasks();
+      }
       if (currentUser.role === 'admin') {
         loadPendingCount();
       } else {
@@ -272,7 +280,7 @@ export default function App() {
       setLocalNotifications([]);
       setLocalPendingWorksCount(0);
     }
-  }, [currentUser, loadNotifications, loadPendingCount]);
+  }, [currentUser, token, loadNotifications, loadPendingCount, loadLmsTasks]);
 
   const handleSyncCloudNow = useCallback(async () => {
     if (!isFirebaseAdmin) {
@@ -329,22 +337,42 @@ export default function App() {
         .filter((lm) => Boolean(lm?.username))
         .map((lm) => [lm.username.trim().toLowerCase(), lm])
     );
-    if (privateMembersMap.size === 0 && !isAdminSessionHint) return safeRaw;
-    return safeRaw.map((m) => {
+    const seenUsernames = new Set<string>();
+    const merged = safeRaw.map((m) => {
+      const unameKey = (m.username || '').trim().toLowerCase();
+      seenUsernames.add(unameKey);
       const key = m.firestoreId || sanitizeDocId(`member_${m.username}`);
       const priv = privateMembersMap.get(key);
-      const localMatch = isAdminSessionHint
-        ? localByUsername.get((m.username || '').trim().toLowerCase())
-        : undefined;
+      const localMatch = isAdminSessionHint ? localByUsername.get(unameKey) : undefined;
       if (!priv && !localMatch) return m;
       return {
         ...m,
         nis: priv?.nis || localMatch?.nis || m.nis,
         nfc_uid: priv?.nfc_uid || localMatch?.nfc_uid || m.nfc_uid,
         parent_whatsapp: priv?.parent_whatsapp || localMatch?.parent_whatsapp || m.parent_whatsapp || '',
+        ...(localMatch && !isFirebaseAdmin
+          ? {
+              full_name: localMatch.full_name || m.full_name,
+              kelas: localMatch.kelas || m.kelas,
+              division: localMatch.division || m.division,
+              role: localMatch.role || m.role,
+              qr_code_token: localMatch.qr_code_token || m.qr_code_token,
+              bio: localMatch.bio ?? m.bio,
+              avatar_color: localMatch.avatar_color || m.avatar_color,
+            }
+          : {}),
       };
     });
-  }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint]);
+    if (isAdminSessionHint && cloudSeeded) {
+      for (const lm of safeLocal) {
+        const unameKey = (lm.username || '').trim().toLowerCase();
+        if (unameKey && !seenUsernames.has(unameKey)) {
+          merged.push(lm);
+        }
+      }
+    }
+    return merged;
+  }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint, isFirebaseAdmin, cloudSeeded]);
 
   // Resolve member identity cleanly for both Username+ID sessions and Google Auth sessions
   const resolvedMember = useMemo(() => {
@@ -374,10 +402,79 @@ export default function App() {
 
   const effectiveIsAdmin = resolvedMember?.role === 'admin' || isFirebaseAdmin;
 
-  const attendanceRecords =
-    (firebaseUser || currentUser) && cloudAttendance !== null ? cloudAttendance : localAttendance;
-  const lmsTasks =
-    (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudLmsTasks : localLmsTasks;
+  const attendanceRecords = useMemo(() => {
+    const safeLocal = Array.isArray(localAttendance) ? localAttendance : [];
+    const safeCloud = Array.isArray(cloudAttendance) ? cloudAttendance : [];
+    const deletedKeys = deletedAttendanceKeysRef.current;
+
+    if (!(firebaseUser || currentUser) || cloudAttendance === null) {
+      return safeLocal.filter((r) => {
+        const comp = `${r.attendance_date}__${(r.username || '').toLowerCase()}`;
+        return !deletedKeys.has(comp) && !(r.firestoreId && deletedKeys.has(`id:${r.firestoreId}`));
+      });
+    }
+
+    const memberByUsername = new Map(
+      members
+        .filter((m) => Boolean(m?.username))
+        .map((m) => [m.username.trim().toLowerCase(), m])
+    );
+
+    const byKey = new Map<string, AttendanceRecord>();
+    for (const r of safeLocal) {
+      const comp = `${r.attendance_date}__${(r.username || '').toLowerCase()}`;
+      if (deletedKeys.has(comp) || (r.firestoreId && deletedKeys.has(`id:${r.firestoreId}`))) continue;
+      byKey.set(comp, r);
+    }
+    for (const r of safeCloud) {
+      const comp = `${r.attendance_date}__${(r.username || '').toLowerCase()}`;
+      if (deletedKeys.has(comp) || (r.firestoreId && deletedKeys.has(`id:${r.firestoreId}`))) continue;
+      const prev = byKey.get(comp);
+      const mem = memberByUsername.get((r.username || '').toLowerCase());
+      byKey.set(comp, {
+        ...(prev || {}),
+        ...r,
+        user_id: r.user_id || prev?.user_id || mem?.id || 0,
+        nis: r.nis || prev?.nis || mem?.nis || '',
+        nfc_uid: r.nfc_uid || prev?.nfc_uid || mem?.nfc_uid || '',
+        parent_whatsapp: r.parent_whatsapp || prev?.parent_whatsapp || mem?.parent_whatsapp || '',
+        check_out_time: r.check_out_time || prev?.check_out_time || '',
+        check_out_method: r.check_out_method || prev?.check_out_method || '',
+        wa_notified_in: Boolean(r.wa_notified_in || prev?.wa_notified_in),
+        wa_notified_out: Boolean(r.wa_notified_out || prev?.wa_notified_out),
+      });
+    }
+
+    return Array.from(byKey.values()).sort((a, b) =>
+      `${b.attendance_date} ${b.check_in_time}`.localeCompare(`${a.attendance_date} ${a.check_in_time}`)
+    );
+  }, [firebaseUser, currentUser, cloudAttendance, localAttendance, members]);
+  const lmsTasks = useMemo(() => {
+    const useCloud =
+      Boolean(firebaseUser || currentUser) &&
+      cloudSeeded &&
+      !firestoreQuotaExceeded &&
+      cloudLmsTasks !== null &&
+      cloudLmsTasks.length > 0;
+    const source = useCloud ? cloudLmsTasks : localLmsTasks;
+    if (!effectiveIsAdmin && resolvedMember) {
+      const userDiv = (resolvedMember.division || '').trim().toLowerCase();
+      return source.filter((t) => {
+        const taskDiv = (t.division || '').trim().toLowerCase();
+        return !taskDiv || taskDiv === 'semua' || taskDiv === 'semua divisi' || (Boolean(userDiv) && taskDiv === userDiv);
+      });
+    }
+    return source;
+  }, [
+    firebaseUser,
+    currentUser,
+    cloudSeeded,
+    firestoreQuotaExceeded,
+    cloudLmsTasks,
+    localLmsTasks,
+    effectiveIsAdmin,
+    resolvedMember,
+  ]);
   const notifications =
     (firebaseUser || currentUser) && cloudNotifications !== null ? cloudNotifications : localNotifications;
   const pendingWorksCount =
@@ -462,7 +559,8 @@ export default function App() {
           setCloudLmsTasks(tasks);
           setCloudAdminTasks(effectiveIsAdmin ? adminTasks : undefined);
         },
-        effectiveMemberDocId
+        effectiveMemberDocId,
+        isFirebaseAdmin
       );
 
       const unsubNotifs = subscribeNotificationsFirestore(
@@ -563,6 +661,22 @@ export default function App() {
     if (!firebaseAuthReady || !isFirebaseAdmin || firestoreQuotaExceeded) return;
     if (cloudSeeded) {
       syncMemberAuthHashesAdmin().catch(() => {});
+      if (localMembers.length > 0) {
+        const sig = localMembers.map((m) => `${m.username}:${m.role}`).join('|');
+        if (missingMembersSyncSigRef.current !== sig) {
+          missingMembersSyncSigRef.current = sig;
+          syncMissingMembersToFirestore(localMembers).catch(() => {});
+        }
+      }
+      if (
+        !lmsMissingSyncAttemptedRef.current &&
+        cloudLmsTasks !== null &&
+        cloudLmsTasks.length === 0 &&
+        localLmsTasks.length > 0
+      ) {
+        lmsMissingSyncAttemptedRef.current = true;
+        syncMissingLmsTasksToFirestore(localLmsTasks).catch(() => {});
+      }
       return;
     }
     if (!bootstrapReady || !bootstrapRef.current) {
@@ -581,7 +695,17 @@ export default function App() {
       .catch(() => {
         autoSeedAttemptedRef.current = false;
       });
-  }, [firebaseAuthReady, isFirebaseAdmin, firestoreQuotaExceeded, cloudSeeded, bootstrapReady, showToast]);
+  }, [
+    firebaseAuthReady,
+    isFirebaseAdmin,
+    firestoreQuotaExceeded,
+    cloudSeeded,
+    bootstrapReady,
+    cloudLmsTasks,
+    localLmsTasks,
+    localMembers,
+    showToast,
+  ]);
 
   // Synthesize effectiveUser from local/portal session OR authenticated Firebase Google session
   const effectiveUser = useMemo<StudentProfile | null>(() => {
@@ -672,6 +796,11 @@ export default function App() {
       (event: WSEvent) => {
         if (event.type === 'attendance:recorded') {
           const rec = event.payload;
+          const comp = `${rec.attendance_date}__${(rec.username || '').toLowerCase()}`;
+          deletedAttendanceKeysRef.current.delete(comp);
+          if (rec.firestoreId) {
+            deletedAttendanceKeysRef.current.delete(`id:${rec.firestoreId}`);
+          }
           setLatestAttendanceEvent(rec);
           setLocalAttendance((prev) => {
             const existsIdx = prev.findIndex(
@@ -691,6 +820,12 @@ export default function App() {
           );
         } else if (event.type === 'attendance:deleted') {
           const { id, firestoreId, username, attendance_date } = event.payload;
+          if (username && attendance_date) {
+            deletedAttendanceKeysRef.current.add(`${attendance_date}__${username.toLowerCase()}`);
+          }
+          if (firestoreId) {
+            deletedAttendanceKeysRef.current.add(`id:${firestoreId}`);
+          }
           const matchesDeleted = (r: AttendanceRecord) =>
             (Boolean(firestoreId) && r.firestoreId === firestoreId) ||
             (id > 0 && r.id === id) ||
@@ -850,7 +985,7 @@ export default function App() {
     setToken(null);
     setCurrentUser(null);
     setLocalAttendance([]);
-    setLocalLmsTasks([]);
+    setLocalLmsTasks((prev) => prev.map((t) => ({ ...t, progress: [], submission: null })));
     setLocalNotifications([]);
     setLocalPendingWorksCount(0);
     if (isAdminOnlyTab(activeTab) || activeTab === 'tugas') {
@@ -1167,11 +1302,12 @@ export default function App() {
                 cloudSeeded={cloudSeeded}
                 initialSelectedTaskId={selectedTaskId}
                 onTaskUpdated={(updatedTask, newTotalPoints) => {
-                  setLocalLmsTasks((prev) =>
-                    prev.map((t) => (t.id === updatedTask.id ? updatedTask : t))
-                  );
+                  const isSameTask = (t: LmsTask) =>
+                    t.id === updatedTask.id ||
+                    (Boolean(updatedTask.firestoreId) && t.firestoreId === updatedTask.firestoreId);
+                  setLocalLmsTasks((prev) => prev.map((t) => (isSameTask(t) ? updatedTask : t)));
                   setCloudLmsTasks((prev) =>
-                    prev ? prev.map((t) => (t.id === updatedTask.id ? updatedTask : t)) : prev
+                    prev ? prev.map((t) => (isSameTask(t) ? updatedTask : t)) : prev
                   );
                   if (newTotalPoints !== undefined) {
                     setCurrentUser((prev) => (prev ? { ...prev, lms_points: newTotalPoints } : prev));
@@ -1194,6 +1330,11 @@ export default function App() {
                 isFirebaseAdmin={isFirebaseAdmin}
                 wsConnected={wsConnected || Boolean(firebaseUser || currentUser)}
                 onAttendanceRecorded={(rec) => {
+                  const comp = `${rec.attendance_date}__${(rec.username || '').toLowerCase()}`;
+                  deletedAttendanceKeysRef.current.delete(comp);
+                  if (rec.firestoreId) {
+                    deletedAttendanceKeysRef.current.delete(`id:${rec.firestoreId}`);
+                  }
                   setLatestAttendanceEvent(rec);
                   const upsertRec = (prev: AttendanceRecord[]) => {
                     const idx = prev.findIndex(
@@ -1208,6 +1349,14 @@ export default function App() {
                   setCloudAttendance((prev) => (prev ? upsertRec(prev) : prev));
                 }}
                 onAttendanceDeleted={(rec) => {
+                  if (rec.username && rec.attendance_date) {
+                    deletedAttendanceKeysRef.current.add(
+                      `${rec.attendance_date}__${rec.username.toLowerCase()}`
+                    );
+                  }
+                  if (rec.firestoreId) {
+                    deletedAttendanceKeysRef.current.add(`id:${rec.firestoreId}`);
+                  }
                   const matchesDeleted = (r: AttendanceRecord) =>
                     (Boolean(rec.firestoreId) && r.firestoreId === rec.firestoreId) ||
                     (rec.id > 0 && r.id === rec.id) ||

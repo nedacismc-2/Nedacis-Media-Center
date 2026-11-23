@@ -260,7 +260,11 @@ function getLmsTasksForUser(user: AuthUser) {
       FROM lms_tasks t
       LEFT JOIN users u ON u.id = t.created_by
       WHERE t.is_published = 1
-        AND (? = 'admin' OR t.division = 'Semua' OR t.division = ?)
+        AND (
+          ? = 'admin'
+          OR LOWER(TRIM(COALESCE(t.division, ''))) IN ('', 'semua', 'semua divisi')
+          OR LOWER(TRIM(COALESCE(t.division, ''))) = LOWER(TRIM(COALESCE(?, '')))
+        )
       ORDER BY t.created_at DESC, t.id DESC
     `)
     .all(user.role, user.division) as Array<Record<string, unknown>>;
@@ -280,6 +284,29 @@ function getLmsTasksForUser(user: AuthUser) {
     stages: stagesStmt.all(t.id),
     progress: progressStmt.all(t.id, user.id),
     submission: submissionStmt.get(t.id, user.id) || null,
+  }));
+}
+
+function getPublishedLmsTasksPublic() {
+  const tasks = db
+    .prepare(`
+      SELECT t.*, u.full_name as creator_name
+      FROM lms_tasks t
+      LEFT JOIN users u ON u.id = t.created_by
+      WHERE t.is_published = 1
+      ORDER BY t.created_at DESC, t.id DESC
+    `)
+    .all() as Array<Record<string, unknown>>;
+
+  const stagesStmt = db.prepare(`
+    SELECT * FROM lms_task_stages WHERE task_id = ? ORDER BY stage_order ASC, id ASC
+  `);
+
+  return tasks.map((t) => ({
+    ...t,
+    stages: stagesStmt.all(t.id),
+    progress: [],
+    submission: null,
   }));
 }
 
@@ -407,6 +434,40 @@ function buildAttendanceWaTextServer(params: {
       `- Pencatat: ${params.recordedBy}`,
       '',
       'Mohon pendampingan kepulangan ananda menuju rumah. Terima kasih.',
+    ].join('\n');
+  }
+  if (params.status === 'Tanpa Keterangan') {
+    return [
+      '*LAPORAN KETIDAKHADIRAN (TANPA KETERANGAN) · NMC SMPN 2 CIAMIS*',
+      '',
+      `Assalamu'alaikum Wr. Wb.`,
+      `Yth. Bapak/Ibu Orang Tua/Wali dari *${params.studentName}* (Kelas ${params.kelas} · Divisi ${params.division}).`,
+      '',
+      'Kami informasikan bahwa ananda tercatat *Tanpa Keterangan (Alpha)* pada kegiatan ekstrakurikuler Nedacis Media Center (NMC):',
+      `- Tanggal: ${params.attendanceDate}`,
+      `- Waktu Pencatatan: ${params.checkInTime} ${params.tzLabel}`,
+      `- Status Kehadiran: *Tanpa Keterangan*`,
+      `- Kegiatan: ${params.sessionTitle}`,
+      `- Pencatat: ${params.recordedBy}`,
+      '',
+      'Mohon konfirmasi kepada pembina ekstrakurikuler apabila ananda berhalangan hadir atau memiliki keterangan izin. Terima kasih.',
+    ].join('\n');
+  }
+  if (params.status === 'Izin') {
+    return [
+      '*LAPORAN IZIN KEHADIRAN · NMC SMPN 2 CIAMIS*',
+      '',
+      `Assalamu'alaikum Wr. Wb.`,
+      `Yth. Bapak/Ibu Orang Tua/Wali dari *${params.studentName}* (Kelas ${params.kelas} · Divisi ${params.division}).`,
+      '',
+      'Kami informasikan bahwa ananda tercatat *Izin* pada kegiatan ekstrakurikuler Nedacis Media Center (NMC):',
+      `- Tanggal: ${params.attendanceDate}`,
+      `- Waktu Pencatatan: ${params.checkInTime} ${params.tzLabel}`,
+      `- Status Kehadiran: *Izin*`,
+      `- Kegiatan: ${params.sessionTitle}`,
+      `- Pencatat: ${params.recordedBy}`,
+      '',
+      'Terima kasih atas konfirmasi Bapak/Ibu.',
     ].join('\n');
   }
   return [
@@ -608,7 +669,7 @@ app.get('/api/bootstrap', (req, res) => {
     members,
     works,
     attendance: attendanceToday,
-    lmsTasks: user ? getLmsTasksForUser(user) : [],
+    lmsTasks: user ? getLmsTasksForUser(user) : getPublishedLmsTasksPublic(),
     siteSettings: getSiteSettings(),
   });
 });
@@ -1149,7 +1210,7 @@ app.post('/api/attendance/scan', requireAdmin, async (req: AuthedRequest, res) =
     code?: string;
     method?: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
     session_title?: string;
-    status?: 'Hadir' | 'Terlambat' | 'Izin';
+    status?: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan';
     attendance_type?: 'auto' | 'check_in' | 'check_out';
     auto_send_wa?: boolean;
   };
@@ -1194,8 +1255,8 @@ app.post('/api/attendance/scan', requireAdmin, async (req: AuthedRequest, res) =
   const scanMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' =
     method === 'QR Scan' || method === 'Manual Admin' ? method : 'NFC/RFID';
 
-  let resolvedStatus: 'Hadir' | 'Terlambat' | 'Izin' = 'Hadir';
-  if (status && ['Hadir', 'Terlambat', 'Izin'].includes(status)) {
+  let resolvedStatus: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan' = 'Hadir';
+  if (status && ['Hadir', 'Terlambat', 'Izin', 'Tanpa Keterangan'].includes(status)) {
     resolvedStatus = status;
   }
 
@@ -1291,11 +1352,18 @@ app.post('/api/attendance/scan', requireAdmin, async (req: AuthedRequest, res) =
   createAndBroadcastNotification({
     userId: student.id,
     type: 'attendance',
-    title: actionType === 'check_out' ? `Absen Pulang ${scanMethod} Tercatat` : `Absen Masuk ${scanMethod} Tercatat`,
+    title:
+      actionType === 'check_out'
+        ? `Absen Pulang ${scanMethod} Tercatat`
+        : resolvedStatus === 'Tanpa Keterangan'
+        ? 'Catatan Kehadiran: Tanpa Keterangan'
+        : resolvedStatus === 'Izin'
+        ? 'Catatan Kehadiran: Izin'
+        : `Absen Masuk ${scanMethod} Tercatat`,
     message:
       actionType === 'check_out'
         ? `${student.full_name} tercatat Absen Pulang pada ${attendanceDate} pukul ${scanTime} ${clientNow.tzLabel} (${String(record.session_title || resolvedSession)}).`
-        : `${student.full_name} tercatat Absen Masuk (${resolvedStatus}) pada ${attendanceDate} pukul ${scanTime} ${clientNow.tzLabel} (${resolvedSession}).`,
+        : `${student.full_name} tercatat ${resolvedStatus} pada ${attendanceDate} pukul ${scanTime} ${clientNow.tzLabel} (${resolvedSession}).`,
     linkTarget: `profil/${student.username}`,
   });
 
@@ -1379,40 +1447,59 @@ app.post('/api/attendance/send-wa', requireAdmin, async (req, res) => {
 
 app.delete('/api/attendance/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isFinite(id) || id <= 0) {
+  const queryUsername = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+  const queryDate = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+
+  if ((!Number.isFinite(id) || id <= 0) && !(queryUsername && queryDate)) {
     res.status(400).json({ error: 'ID log kehadiran tidak valid.' });
     return;
   }
 
-  const existing = db
-    .prepare(`
-      SELECT ar.id, ar.user_id, ar.attendance_date, u.username
-      FROM attendance_records ar
-      LEFT JOIN users u ON u.id = ar.user_id
-      WHERE ar.id = ?
-    `)
-    .get(id) as
-    | { id: number; user_id: number; attendance_date: string; username?: string }
-    | undefined;
+  let existing =
+    Number.isFinite(id) && id > 0
+      ? (db
+          .prepare(`
+            SELECT ar.id, ar.user_id, ar.attendance_date, u.username
+            FROM attendance_records ar
+            LEFT JOIN users u ON u.id = ar.user_id
+            WHERE ar.id = ?
+          `)
+          .get(id) as
+          | { id: number; user_id: number; attendance_date: string; username?: string }
+          | undefined)
+      : undefined;
+
+  if (!existing && queryUsername && queryDate) {
+    existing = db
+      .prepare(`
+        SELECT ar.id, ar.user_id, ar.attendance_date, u.username
+        FROM attendance_records ar
+        JOIN users u ON u.id = ar.user_id
+        WHERE LOWER(u.username) = LOWER(?) AND ar.attendance_date = ?
+      `)
+      .get(queryUsername, queryDate) as
+      | { id: number; user_id: number; attendance_date: string; username?: string }
+      | undefined;
+  }
 
   if (!existing) {
     res.status(404).json({ error: 'Catatan kehadiran tidak ditemukan.' });
     return;
   }
 
-  db.prepare('DELETE FROM attendance_records WHERE id = ?').run(id);
+  db.prepare('DELETE FROM attendance_records WHERE id = ?').run(existing.id);
   checkpointDatabase('PASSIVE');
 
   broadcastEvent({
     type: 'attendance:deleted',
     payload: {
-      id,
-      username: existing.username || '',
+      id: existing.id,
+      username: existing.username || queryUsername || '',
       attendance_date: existing.attendance_date,
     },
   });
 
-  res.json({ ok: true, id });
+  res.json({ ok: true, id: existing.id });
 });
 
 app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
@@ -1444,9 +1531,10 @@ app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
     const hadirCount = records.filter((r) => r.status === 'Hadir').length;
     const terlambatCount = records.filter((r) => r.status === 'Terlambat').length;
     const izinCount = records.filter((r) => r.status === 'Izin').length;
+    const tanpaKeteranganCount = records.filter((r) => r.status === 'Tanpa Keterangan').length;
     const pulangCount = records.filter((r) => Boolean(r.check_out_time && r.check_out_time.trim())).length;
     const attended = hadirCount + terlambatCount;
-    const alphaCount = Math.max(0, totalSessionsRow.cnt - (attended + izinCount));
+    const alphaCount = Math.max(tanpaKeteranganCount, totalSessionsRow.cnt - (attended + izinCount));
     const attendanceRate = totalSessionsRow.cnt === 0 ? 0 : Math.round((attended / totalSessions) * 100);
 
     return {
@@ -2222,15 +2310,28 @@ app.post('/api/tasks/:id/stages/:stageId/complete', requireAuth, (req: AuthedReq
       completed_at = excluded.completed_at
   `).run(taskId, stageId, user.id, (responseText || '').trim().slice(0, 1000), now);
 
+  checkpointDatabase('PASSIVE');
   const updatedTask = getLmsTasksForUser(user).find((t: Record<string, unknown>) => t.id === taskId);
   res.json({ task: updatedTask });
 });
 
 app.post('/api/tasks/:id/submit', requireAuth, lmsUpload.single('file'), (req: AuthedRequest, res) => {
   const taskId = Number(req.params.id);
-  const { submissionNote } = req.body as { submissionNote?: string };
+  const { submissionNote, file_url: reqFileUrl, file_name: reqFileName, file_type: reqFileType } = req.body as {
+    submissionNote?: string;
+    file_url?: string;
+    file_name?: string;
+    file_type?: string;
+  };
   const user = req.user!;
   const file = req.file;
+  const cleanLinkUrl = typeof reqFileUrl === 'string' ? reqFileUrl.trim().slice(0, 500) : '';
+  const hasValidLinkUrl = /^(https?:\/\/|cloudfile:\/\/|\/uploads\/)/i.test(cleanLinkUrl);
+
+  if (cleanLinkUrl && !hasValidLinkUrl) {
+    res.status(400).json({ error: 'Tautan tugas harus berupa URL HTTPS/HTTP yang valid.' });
+    return;
+  }
 
   const task = db.prepare('SELECT * FROM lms_tasks WHERE id = ? AND is_published = 1').get(taskId) as
     | { id: number; title: string; points_reward: number; division: string }
@@ -2274,21 +2375,38 @@ app.post('/api/tasks/:id/submit', requireAuth, lmsUpload.single('file'), (req: A
     | { id: number; file_url: string; file_name: string; file_type: string }
     | undefined;
 
-  if (!file && !existingSub?.file_url) {
-    res.status(400).json({ error: 'File hasil tugas wajib diunggah pada tahap akhir.' });
+  if (!file && !hasValidLinkUrl && !existingSub?.file_url) {
+    res.status(400).json({ error: 'File atau tautan hasil tugas wajib diisi pada tahap akhir.' });
     return;
   }
 
-  if (file && existingSub?.file_url && existingSub.file_url.startsWith('/uploads/')) {
+  if (
+    (file || hasValidLinkUrl) &&
+    existingSub?.file_url &&
+    existingSub.file_url.startsWith('/uploads/') &&
+    existingSub.file_url !== cleanLinkUrl
+  ) {
     const oldPath = path.join(UPLOADS_DIR, path.basename(existingSub.file_url));
     if (fs.existsSync(oldPath)) {
       fs.unlink(oldPath, () => {});
     }
   }
 
-  const fileUrl = file ? `/uploads/${file.filename}` : existingSub!.file_url;
-  const fileName = file ? file.originalname : existingSub!.file_name;
-  const fileType = file ? file.mimetype : existingSub!.file_type;
+  const fileUrl = file
+    ? `/uploads/${file.filename}`
+    : hasValidLinkUrl
+    ? cleanLinkUrl
+    : existingSub!.file_url;
+  const fileName = file
+    ? file.originalname
+    : hasValidLinkUrl
+    ? (typeof reqFileName === 'string' && reqFileName.trim() ? reqFileName.trim() : 'Tautan Hasil Tugas').slice(0, 200)
+    : existingSub!.file_name;
+  const fileType = file
+    ? file.mimetype
+    : hasValidLinkUrl
+    ? (typeof reqFileType === 'string' && reqFileType.trim() ? reqFileType.trim() : 'application/link').slice(0, 120)
+    : existingSub!.file_type;
   const note = (submissionNote || '').trim().slice(0, 1000);
   const now = new Date().toISOString();
 
@@ -2316,6 +2434,7 @@ app.post('/api/tasks/:id/submit', requireAuth, lmsUpload.single('file'), (req: A
     `).run(taskId, user.id, fileUrl, fileName, fileType, note, task.points_reward, now);
   });
   tx();
+  checkpointDatabase('PASSIVE');
 
   const totalPoints = getUserTotalLmsPoints(user.id);
   const updatedTask = getLmsTasksForUser(user).find((t: Record<string, unknown>) => t.id === taskId);
@@ -2507,6 +2626,7 @@ app.post('/api/admin/tasks', requireAdmin, (req: AuthedRequest, res) => {
     }
   }
 
+  checkpointDatabase('PASSIVE');
   res.status(201).json({ task: { ...created, stages: createdStages, submissions: [] } });
 });
 
@@ -2518,6 +2638,7 @@ app.delete('/api/admin/tasks/:id', requireAdmin, (req, res) => {
     return;
   }
   db.prepare('DELETE FROM lms_tasks WHERE id = ?').run(id);
+  checkpointDatabase('PASSIVE');
   broadcastEvent({ type: 'task:deleted', payload: { id } });
   res.json({ ok: true });
 });

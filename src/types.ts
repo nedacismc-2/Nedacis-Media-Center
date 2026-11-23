@@ -118,7 +118,7 @@ export interface AttendanceRecord {
   check_out_time?: string;
   method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
   check_out_method?: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '';
-  status: 'Hadir' | 'Terlambat' | 'Izin';
+  status: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan';
   session_title: string;
   recorded_by: string;
   wa_notified_in?: boolean | number;

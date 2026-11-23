@@ -417,10 +417,16 @@ export function GallerySection({
   const handleDeleteWork = async (work: StudentWork) => {
     try {
       if (work.firestoreId) {
-        await deleteWorkInFirestore(work.firestoreId);
+        try {
+          await deleteWorkInFirestore(work.firestoreId);
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
       if (getStoredToken()) {
-        await apiFetch(`/api/works/${work.id}`, { method: 'DELETE' }).catch(() => {});
+        await apiFetch(`/api/works/${work.id}`, { method: 'DELETE' }).catch((err) => {
+          if (!work.firestoreId) throw err;
+        });
       }
       onWorkDeleted(work.id);
       if (selectedWork?.id === work.id) onSelectWork(null);
@@ -433,14 +439,20 @@ export function GallerySection({
   const handleDeleteComment = async (comment: WorkComment) => {
     try {
       if (selectedWork?.firestoreId && comment.firestoreId) {
-        await deleteWorkCommentInFirestore(
-          selectedWork.firestoreId,
-          comment.firestoreId,
-          selectedWork.comments_count
-        );
+        try {
+          await deleteWorkCommentInFirestore(
+            selectedWork.firestoreId,
+            comment.firestoreId,
+            selectedWork.comments_count
+          );
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
       if (getStoredToken()) {
-        await apiFetch(`/api/comments/${comment.id}`, { method: 'DELETE' }).catch(() => {});
+        await apiFetch(`/api/comments/${comment.id}`, { method: 'DELETE' }).catch((err) => {
+          if (!comment.firestoreId) throw err;
+        });
       }
       setCloudComments((prev) => (prev ? prev.filter((c) => c.id !== comment.id) : prev));
       onToast('Komentar telah dihapus oleh admin.', 'info');

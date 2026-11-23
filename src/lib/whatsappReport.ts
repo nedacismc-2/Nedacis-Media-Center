@@ -68,6 +68,42 @@ export function buildAttendanceWhatsappMessage(params: {
   }
 
   const masuk = params.checkInTime || params.timeStr;
+  if (params.status === 'Tanpa Keterangan') {
+    return [
+      '*LAPORAN KETIDAKHADIRAN (TANPA KETERANGAN) · NMC SMPN 2 CIAMIS*',
+      '',
+      `Assalamu'alaikum Wr. Wb.`,
+      `Yth. Bapak/Ibu Orang Tua/Wali dari *${params.studentName}* (Kelas ${params.kelas} · Divisi ${params.division}).`,
+      '',
+      'Kami informasikan bahwa ananda tercatat *Tanpa Keterangan (Alpha)* pada kegiatan ekstrakurikuler Nedacis Media Center (NMC):',
+      `- Tanggal: ${dateLabel}`,
+      `- Waktu Pencatatan: ${masuk} ${params.tzLabel}`,
+      `- Status Kehadiran: *Tanpa Keterangan*`,
+      `- Kegiatan: ${params.sessionTitle}`,
+      `- Pencatat: ${params.recordedBy}`,
+      '',
+      'Mohon konfirmasi kepada pembina ekstrakurikuler apabila ananda berhalangan hadir atau memiliki keterangan izin. Terima kasih atas perhatian Bapak/Ibu.',
+    ].join('\n');
+  }
+
+  if (params.status === 'Izin') {
+    return [
+      '*LAPORAN IZIN KEHADIRAN · NMC SMPN 2 CIAMIS*',
+      '',
+      `Assalamu'alaikum Wr. Wb.`,
+      `Yth. Bapak/Ibu Orang Tua/Wali dari *${params.studentName}* (Kelas ${params.kelas} · Divisi ${params.division}).`,
+      '',
+      'Kami informasikan bahwa ananda tercatat *Izin* pada kegiatan ekstrakurikuler Nedacis Media Center (NMC):',
+      `- Tanggal: ${dateLabel}`,
+      `- Waktu Pencatatan: ${masuk} ${params.tzLabel}`,
+      `- Status Kehadiran: *Izin*`,
+      `- Kegiatan: ${params.sessionTitle}`,
+      `- Pencatat: ${params.recordedBy}`,
+      '',
+      'Terima kasih atas konfirmasi Bapak/Ibu terhadap kegiatan siswa di SMP Negeri 2 Ciamis.',
+    ].join('\n');
+  }
+
   return [
     '*LAPORAN ABSENSI MASUK · NMC SMPN 2 CIAMIS*',
     '',

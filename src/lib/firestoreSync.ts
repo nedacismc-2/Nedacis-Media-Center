@@ -1413,7 +1413,7 @@ export interface RecordedAttendanceCloudResult {
   checkOutTime: string;
   method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
   checkOutMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '';
-  status: 'Hadir' | 'Terlambat' | 'Izin';
+  status: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan';
   sessionTitle: string;
   waNotifiedIn: boolean;
   waNotifiedOut: boolean;
@@ -1430,7 +1430,7 @@ export async function recordAttendanceInFirestore(params: {
   checkInTime: string;
   attendanceMode?: 'auto' | 'check_in' | 'check_out';
   method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
-  status: 'Hadir' | 'Terlambat' | 'Izin';
+  status: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan';
   sessionTitle: string;
   recordedBy: string;
   recordedByUid?: string;
@@ -1451,7 +1451,7 @@ export async function recordAttendanceInFirestore(params: {
     let finalCheckOutTime = '';
     let finalMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' = params.method;
     let finalCheckOutMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '' = '';
-    let finalStatus: 'Hadir' | 'Terlambat' | 'Izin' = params.status;
+    let finalStatus: 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan' = params.status;
     let finalSessionTitle = clampStr(params.sessionTitle, 180);
     let finalWaIn = false;
     let finalWaOut = false;
@@ -1506,7 +1506,7 @@ export async function recordAttendanceInFirestore(params: {
         finalMethod = (existingData.method as 'NFC/RFID' | 'QR Scan' | 'Manual Admin') || params.method;
         finalCheckOutTime = scanTime;
         finalCheckOutMethod = params.method;
-        finalStatus = (existingData.status as 'Hadir' | 'Terlambat' | 'Izin') || params.status;
+        finalStatus = (existingData.status as 'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan') || params.status;
         finalSessionTitle = String(existingData.sessionTitle || finalSessionTitle);
         await updateDoc(ref, {
           checkOutTime: finalCheckOutTime,
@@ -1522,11 +1522,15 @@ export async function recordAttendanceInFirestore(params: {
     const notifTitle =
       actionType === 'check_out'
         ? 'Absen Pulang Tercatat'
+        : finalStatus === 'Tanpa Keterangan'
+        ? 'Catatan Kehadiran: Tanpa Keterangan'
+        : finalStatus === 'Izin'
+        ? 'Catatan Kehadiran: Izin'
         : `Absen Masuk Tercatat (${finalStatus})`;
     const notifBody =
       actionType === 'check_out'
         ? `${finalSessionTitle} · Absen Pulang (${finalCheckOutMethod || params.method}) pukul ${finalCheckOutTime} oleh ${params.recordedBy}`
-        : `${finalSessionTitle} · Absen Masuk (${finalMethod}) pukul ${finalCheckInTime} oleh ${params.recordedBy}`;
+        : `${finalSessionTitle} · ${finalStatus} (${finalMethod}) pukul ${finalCheckInTime} oleh ${params.recordedBy}`;
     await setDoc(doc(db, 'notifications', notifId), {
       targetUid: memberDocId,
       type: 'attendance',
@@ -1574,13 +1578,32 @@ export async function markAttendanceWaNotifiedInFirestore(
   }
 }
 
-export async function deleteAttendanceInFirestore(recordDocId: string): Promise<void> {
+export async function deleteAttendanceInFirestore(
+  recordDocId: string,
+  actorPembinaId?: string
+): Promise<void> {
   const cleanId = sanitizeDocId(recordDocId);
   if (!cleanId) return;
   const path = `attendance_records/${cleanId}`;
+  const ref = doc(db, 'attendance_records', cleanId);
   try {
-    await deleteDoc(doc(db, 'attendance_records', cleanId));
+    await deleteDoc(ref);
   } catch (error) {
+    const cleanActorId = actorPembinaId ? sanitizeDocId(actorPembinaId) : '';
+    const msg = error instanceof Error ? error.message : '';
+    const isPerm =
+      msg.includes('permission') ||
+      msg.includes('PERMISSION_DENIED') ||
+      (typeof error === 'object' && error !== null && (error as { code?: string }).code === 'permission-denied');
+    if (isPerm && cleanActorId.startsWith('member_')) {
+      try {
+        await updateDoc(ref, { recordedByUid: cleanActorId });
+        await deleteDoc(ref);
+        return;
+      } catch (retryErr) {
+        handleFirestoreError(retryErr, OperationType.DELETE, path);
+      }
+    }
     handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
@@ -1589,15 +1612,16 @@ export function subscribeLmsTasks(
   isAdmin: boolean,
   uid: string,
   onData: (tasks: LmsTask[], adminTasks: AdminLmsTask[]) => void,
-  memberId?: string
+  memberId?: string,
+  canQueryAllTasks?: boolean
 ): Unsubscribe {
   const path = 'lms_tasks';
   const cleanMemberId = memberId ? sanitizeDocId(memberId) : '';
   const actorIds = Array.from(new Set([uid, cleanMemberId].filter(Boolean)));
-  const q =
-    isAdmin && Boolean(auth.currentUser)
-      ? query(collection(db, path))
-      : query(collection(db, path), where('isPublished', '==', true));
+  const allowAllQuery = canQueryAllTasks ?? (isAdmin && Boolean(auth.currentUser));
+  const q = allowAllQuery
+    ? query(collection(db, path))
+    : query(collection(db, path), where('isPublished', '==', true));
 
   return onSnapshot(
     q,
@@ -1611,21 +1635,30 @@ export function subscribeLmsTasks(
         const subSnapMap = new Map<string, { id: string; data: () => Record<string, unknown> }>();
 
         if (actorIds.length > 0) {
+          const safeGetDocs = async (qRef: Parameters<typeof getDocs>[0]) => {
+            try {
+              return await getDocs(qRef);
+            } catch {
+              return null;
+            }
+          };
+
           const progressPromises = [
-            ...(uid ? [getDocs(query(collection(db, 'lms_task_progress'), where('userUid', '==', uid)))] : []),
+            ...(uid ? [safeGetDocs(query(collection(db, 'lms_task_progress'), where('userUid', '==', uid)))] : []),
             ...(cleanMemberId && cleanMemberId !== uid
-              ? [getDocs(query(collection(db, 'lms_task_progress'), where('userUid', '==', cleanMemberId)))]
+              ? [safeGetDocs(query(collection(db, 'lms_task_progress'), where('userUid', '==', cleanMemberId)))]
               : []),
             ...(cleanMemberId
-              ? [getDocs(query(collection(db, 'lms_task_progress'), where('memberId', '==', cleanMemberId)))]
+              ? [safeGetDocs(query(collection(db, 'lms_task_progress'), where('memberId', '==', cleanMemberId)))]
               : []),
           ];
           const progressSnaps = await Promise.all(progressPromises);
           for (const progressSnap of progressSnaps) {
+            if (!progressSnap) continue;
             for (const p of progressSnap.docs) {
               if (seenProgressIds.has(p.id)) continue;
               seenProgressIds.add(p.id);
-              const pd = p.data();
+              const pd = p.data() as Record<string, unknown>;
               const tId = String(pd.taskId || '');
               const arr = progressByTask.get(tId) || [];
               arr.push({
@@ -1639,24 +1672,27 @@ export function subscribeLmsTasks(
           }
 
           if (isAdmin) {
-            const subSnap = await getDocs(query(collection(db, 'lms_task_submissions')));
-            for (const s of subSnap.docs) {
-              subSnapMap.set(s.id, { id: s.id, data: () => s.data() });
+            const subSnap = await safeGetDocs(query(collection(db, 'lms_task_submissions')));
+            if (subSnap) {
+              for (const s of subSnap.docs) {
+                subSnapMap.set(s.id, { id: s.id, data: () => s.data() as Record<string, unknown> });
+              }
             }
           } else {
             const subPromises = [
-              ...(uid ? [getDocs(query(collection(db, 'lms_task_submissions'), where('userUid', '==', uid)))] : []),
+              ...(uid ? [safeGetDocs(query(collection(db, 'lms_task_submissions'), where('userUid', '==', uid)))] : []),
               ...(cleanMemberId && cleanMemberId !== uid
-                ? [getDocs(query(collection(db, 'lms_task_submissions'), where('userUid', '==', cleanMemberId)))]
+                ? [safeGetDocs(query(collection(db, 'lms_task_submissions'), where('userUid', '==', cleanMemberId)))]
                 : []),
               ...(cleanMemberId
-                ? [getDocs(query(collection(db, 'lms_task_submissions'), where('memberId', '==', cleanMemberId)))]
+                ? [safeGetDocs(query(collection(db, 'lms_task_submissions'), where('memberId', '==', cleanMemberId)))]
                 : []),
             ];
             const subSnaps = await Promise.all(subPromises);
             for (const subSnap of subSnaps) {
+              if (!subSnap) continue;
               for (const s of subSnap.docs) {
-                subSnapMap.set(s.id, { id: s.id, data: () => s.data() });
+                subSnapMap.set(s.id, { id: s.id, data: () => s.data() as Record<string, unknown> });
               }
             }
           }
@@ -1668,23 +1704,28 @@ export function subscribeLmsTasks(
           const docSnap = snap.docs[idx];
           const d = docSnap.data();
           const taskNumId = deterministicNumericId(docSnap.id);
-          const stagesSnap = await getDocs(collection(db, 'lms_tasks', docSnap.id, 'stages'));
-          const stages: LmsTaskStage[] = stagesSnap.docs
-            .map((stDoc, sIdx) => {
-              const sd = stDoc.data();
-              return {
-                id: deterministicNumericId(stDoc.id),
-                firestoreId: stDoc.id,
-                task_id: taskNumId,
-                stage_order: Number(sd.stageOrder || sIdx + 1),
-                stage_type: (sd.stageType as 'reading' | 'practice' | 'upload') || 'reading',
-                title: String(sd.title || ''),
-                content: String(sd.content || ''),
-                attachment_url: String(sd.attachmentUrl || ''),
-                created_at: toIsoString(sd.createdAt),
-              };
-            })
-            .sort((a, b) => a.stage_order - b.stage_order);
+          let stages: LmsTaskStage[] = [];
+          try {
+            const stagesSnap = await getDocs(collection(db, 'lms_tasks', docSnap.id, 'stages'));
+            stages = stagesSnap.docs
+              .map((stDoc, sIdx) => {
+                const sd = stDoc.data();
+                return {
+                  id: deterministicNumericId(stDoc.id),
+                  firestoreId: stDoc.id,
+                  task_id: taskNumId,
+                  stage_order: Number(sd.stageOrder || sIdx + 1),
+                  stage_type: (sd.stageType as 'reading' | 'practice' | 'upload') || 'reading',
+                  title: String(sd.title || ''),
+                  content: String(sd.content || ''),
+                  attachment_url: String(sd.attachmentUrl || ''),
+                  created_at: toIsoString(sd.createdAt),
+                };
+              })
+              .sort((a, b) => a.stage_order - b.stage_order);
+          } catch {
+            stages = [];
+          }
 
           const taskProgressRaw = progressByTask.get(docSnap.id) || [];
           const mappedProgress = taskProgressRaw.map((p) => {
@@ -2285,6 +2326,70 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
   }
 }
 
+export async function syncMissingLmsTasksToFirestore(localTasks: LmsTask[]): Promise<number> {
+  const uid = auth.currentUser?.uid;
+  if (!uid || isFirestoreQuotaExceeded() || !Array.isArray(localTasks) || localTasks.length === 0) {
+    return 0;
+  }
+  try {
+    const existingSnap = await getDocs(collection(db, 'lms_tasks'));
+    if (!existingSnap.empty) {
+      return 0;
+    }
+
+    let batch = writeBatch(db);
+    let opCount = 0;
+    let syncedCount = 0;
+
+    for (const t of localTasks) {
+      const taskId = sanitizeDocId(`task_${t.id}`);
+      batch.set(doc(db, 'lms_tasks', taskId), {
+        title: clampStr(t.title, 180),
+        description: clampStr(t.description || '', 1000),
+        division: clampStr(t.division || 'Semua', 40),
+        pointsReward: Math.max(1, Math.min(10000, Number(t.points_reward) || 100)),
+        dueDate: clampStr(t.due_date || '', 30),
+        isPublished: Boolean(t.is_published ?? 1),
+        creatorName: clampStr(t.creator_name || 'Pembina NMC', 120),
+        createdByUid: uid,
+        createdAt: serverTimestamp(),
+      });
+      opCount++;
+
+      for (const st of t.stages || []) {
+        const stageId = sanitizeDocId(`stage_${t.id}_${st.id}`);
+        batch.set(doc(db, 'lms_tasks', taskId, 'stages', stageId), {
+          taskId,
+          stageOrder: Number(st.stage_order) || 1,
+          stageType: st.stage_type,
+          title: clampStr(st.title, 160),
+          content: clampStr(st.content || '', 4000),
+          attachmentUrl: clampStr(st.attachment_url || '', 500),
+          createdAt: serverTimestamp(),
+        });
+        opCount++;
+      }
+
+      syncedCount++;
+      if (opCount >= 380) {
+        await batch.commit();
+        batch = writeBatch(db);
+        opCount = 0;
+      }
+    }
+
+    if (opCount > 0) {
+      await batch.commit();
+    }
+    return syncedCount;
+  } catch (error) {
+    if (isQuotaExceededError(error)) {
+      markFirestoreQuotaExceeded();
+    }
+    return 0;
+  }
+}
+
 function replaceMmcText(text: string): string {
   return text
     .replace(/Multimedia Media Center \(MMC\)/g, 'Nedacis Media Center (NMC)')
@@ -2457,5 +2562,122 @@ export async function syncMemberAuthHashesAdmin(force = false): Promise<void> {
       markFirestoreQuotaExceeded();
     }
     // Non-fatal background sync
+  }
+}
+
+export async function syncMissingMembersToFirestore(localMembers: StudentProfile[]): Promise<number> {
+  const uid = auth.currentUser?.uid;
+  if (!uid || isFirestoreQuotaExceeded() || !Array.isArray(localMembers) || localMembers.length === 0) {
+    return 0;
+  }
+  try {
+    const [pubSnap, privSnap] = await Promise.all([
+      getDocs(collection(db, 'members_public')),
+      getDocs(collection(db, 'members_private')),
+    ]);
+    const pubMap = new Map<string, Record<string, unknown>>();
+    for (const d of pubSnap.docs) {
+      pubMap.set(d.id, d.data() as Record<string, unknown>);
+    }
+    const privSet = new Set(privSnap.docs.map((d) => d.id));
+
+    let batch = writeBatch(db);
+    let opCount = 0;
+    let syncedCount = 0;
+
+    for (const m of localMembers) {
+      if (!m?.username) continue;
+      const memberId = sanitizeDocId(`member_${m.username}`);
+      const existingPub = pubMap.get(memberId);
+      const defaultPass =
+        m.username === 'admin' ? 'adminmmc' : m.role === 'admin' ? 'pembina123' : 'siswa123';
+      const rawNfcUid = clampStr(m.nfc_uid || `04NMC${m.id}`, 64);
+
+      if (!existingPub) {
+        const authHashes = await buildMemberAuthHashes({
+          qrCodeToken: m.qr_code_token || `NMC-${m.id}`,
+          nis: m.nis || `NIS-${m.id}`,
+          password: defaultPass,
+        });
+        const nfcHash = await buildNfcHash(rawNfcUid);
+        batch.set(doc(db, 'members_public', memberId), {
+          legacyId: m.id,
+          username: clampStr(m.username, 60),
+          role: m.role === 'admin' ? 'admin' : 'student',
+          fullName: clampStr(m.full_name, 120),
+          kelas: clampStr(m.kelas || (m.role === 'admin' ? 'Pembina' : '8A'), 30),
+          division: clampStr(m.division || 'Fotografi', 40),
+          bio: clampStr(m.bio || '', 400),
+          qrCodeToken: clampStr(m.qr_code_token || `NMC-${m.id}`, 60),
+          avatarColor: clampStr(m.avatar_color || '#1D4ED8', 16),
+          avatarUrl: clampStr(m.avatar_url || '', 500),
+          showInMembers: Boolean(m.show_in_members ?? (m.role === 'student' ? 1 : 0)),
+          isVisible: true,
+          ownerUid: '',
+          authHashes,
+          ...(nfcHash ? { nfcHash } : {}),
+          attendanceCount: Number(m.attendance_count || 0),
+          worksCount: Number(m.works_count || 0),
+          lmsPoints: Number(m.lms_points || 0),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        opCount++;
+
+        if (!privSet.has(memberId)) {
+          batch.set(doc(db, 'members_private', memberId), {
+            memberId,
+            ownerUid: '',
+            nis: clampStr(m.nis || `NIS-${m.id}`, 40),
+            nfcUid: rawNfcUid,
+            parentWhatsapp: clampStr(m.parent_whatsapp || '', 30),
+            email: '',
+            updatedAt: serverTimestamp(),
+          });
+          opCount++;
+        }
+        syncedCount++;
+      } else {
+        const existingRole = existingPub.role === 'admin' ? 'admin' : 'student';
+        const desiredRole = m.role === 'admin' ? 'admin' : 'student';
+        const existingHashes = Array.isArray(existingPub.authHashes)
+          ? (existingPub.authHashes as string[])
+          : [];
+        if (existingRole !== desiredRole || existingHashes.length === 0) {
+          const authHashes = await buildMemberAuthHashes({
+            qrCodeToken: String(existingPub.qrCodeToken || m.qr_code_token || `NMC-${m.id}`),
+            nis: m.nis || `NIS-${m.id}`,
+            password: defaultPass,
+            existingHashes,
+          });
+          const nfcHash = rawNfcUid ? await buildNfcHash(rawNfcUid) : '';
+          batch.update(doc(db, 'members_public', memberId), {
+            role: desiredRole,
+            showInMembers: Boolean(m.show_in_members ?? (desiredRole === 'student' ? 1 : 0)),
+            authHashes,
+            ...(nfcHash ? { nfcHash } : {}),
+            updatedAt: serverTimestamp(),
+          });
+          opCount++;
+          syncedCount++;
+        }
+      }
+
+      if (opCount >= 380) {
+        await batch.commit();
+        batch = writeBatch(db);
+        opCount = 0;
+      }
+    }
+
+    if (opCount > 0) {
+      await batch.commit();
+    }
+    return syncedCount;
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      markFirestoreQuotaExceeded();
+    }
+    return 0;
   }
 }
