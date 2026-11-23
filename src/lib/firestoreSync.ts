@@ -1574,6 +1574,17 @@ export async function markAttendanceWaNotifiedInFirestore(
   }
 }
 
+export async function deleteAttendanceInFirestore(recordDocId: string): Promise<void> {
+  const cleanId = sanitizeDocId(recordDocId);
+  if (!cleanId) return;
+  const path = `attendance_records/${cleanId}`;
+  try {
+    await deleteDoc(doc(db, 'attendance_records', cleanId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
 export function subscribeLmsTasks(
   isAdmin: boolean,
   uid: string,

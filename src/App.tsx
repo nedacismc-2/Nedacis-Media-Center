@@ -689,6 +689,27 @@ export default function App() {
               m.id === rec.user_id ? { ...m, attendance_count: (m.attendance_count ?? 0) + 1 } : m
             )
           );
+        } else if (event.type === 'attendance:deleted') {
+          const { id, firestoreId, username, attendance_date } = event.payload;
+          const matchesDeleted = (r: AttendanceRecord) =>
+            (Boolean(firestoreId) && r.firestoreId === firestoreId) ||
+            (id > 0 && r.id === id) ||
+            (Boolean(username) &&
+              Boolean(attendance_date) &&
+              r.username === username &&
+              r.attendance_date === attendance_date);
+          setLocalAttendance((prev) => prev.filter((r) => !matchesDeleted(r)));
+          setCloudAttendance((prev) => (prev ? prev.filter((r) => !matchesDeleted(r)) : prev));
+          setLatestAttendanceEvent((prev) => (prev && matchesDeleted(prev) ? null : prev));
+          if (username) {
+            setLocalMembers((prev) =>
+              prev.map((m) =>
+                m.username === username
+                  ? { ...m, attendance_count: Math.max(0, (m.attendance_count ?? 0) - 1) }
+                  : m
+              )
+            );
+          }
         } else if (event.type === 'notification:new') {
           const notif = event.payload;
           setLocalNotifications((prev) => {
@@ -1185,6 +1206,23 @@ export default function App() {
                   };
                   setLocalAttendance(upsertRec);
                   setCloudAttendance((prev) => (prev ? upsertRec(prev) : prev));
+                }}
+                onAttendanceDeleted={(rec) => {
+                  const matchesDeleted = (r: AttendanceRecord) =>
+                    (Boolean(rec.firestoreId) && r.firestoreId === rec.firestoreId) ||
+                    (rec.id > 0 && r.id === rec.id) ||
+                    (r.attendance_date === rec.attendance_date &&
+                      (r.username === rec.username || (rec.user_id > 0 && r.user_id === rec.user_id)));
+                  setLatestAttendanceEvent((prev) => (prev && matchesDeleted(prev) ? null : prev));
+                  setLocalAttendance((prev) => prev.filter((r) => !matchesDeleted(r)));
+                  setCloudAttendance((prev) => (prev ? prev.filter((r) => !matchesDeleted(r)) : prev));
+                  setLocalMembers((prev) =>
+                    prev.map((m) =>
+                      m.username === rec.username || (rec.user_id > 0 && m.id === rec.user_id)
+                        ? { ...m, attendance_count: Math.max(0, (m.attendance_count ?? 0) - 1) }
+                        : m
+                    )
+                  );
                 }}
                 onOpenMemberProfile={openMemberProfile}
                 onToast={showToast}

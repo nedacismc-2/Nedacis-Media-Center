@@ -1377,6 +1377,44 @@ app.post('/api/attendance/send-wa', requireAdmin, async (req, res) => {
   res.json({ ok: dispatch.sent, ...dispatch });
 });
 
+app.delete('/api/attendance/:id', requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ error: 'ID log kehadiran tidak valid.' });
+    return;
+  }
+
+  const existing = db
+    .prepare(`
+      SELECT ar.id, ar.user_id, ar.attendance_date, u.username
+      FROM attendance_records ar
+      LEFT JOIN users u ON u.id = ar.user_id
+      WHERE ar.id = ?
+    `)
+    .get(id) as
+    | { id: number; user_id: number; attendance_date: string; username?: string }
+    | undefined;
+
+  if (!existing) {
+    res.status(404).json({ error: 'Catatan kehadiran tidak ditemukan.' });
+    return;
+  }
+
+  db.prepare('DELETE FROM attendance_records WHERE id = ?').run(id);
+  checkpointDatabase('PASSIVE');
+
+  broadcastEvent({
+    type: 'attendance:deleted',
+    payload: {
+      id,
+      username: existing.username || '',
+      attendance_date: existing.attendance_date,
+    },
+  });
+
+  res.json({ ok: true, id });
+});
+
 app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
   const defaultMonth = getClientNowParts(req).monthStr;
   const month = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : defaultMonth;

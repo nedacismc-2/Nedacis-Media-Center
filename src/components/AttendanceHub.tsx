@@ -18,6 +18,7 @@ import {
   ScanLine,
   Send,
   StopCircle,
+  Trash2,
   Upload,
   Usb,
   Wifi,
@@ -26,6 +27,7 @@ import type { AttendanceRecord, MonthlyReportRow, StudentProfile } from '../type
 import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
 import {
+  deleteAttendanceInFirestore,
   markAttendanceWaNotifiedInFirestore,
   recordAttendanceInFirestore,
   sanitizeDocId,
@@ -47,6 +49,7 @@ interface AttendanceHubProps {
   isFirebaseAdmin?: boolean;
   wsConnected: boolean;
   onAttendanceRecorded: (record: AttendanceRecord) => void;
+  onAttendanceDeleted?: (record: AttendanceRecord) => void;
   onOpenMemberProfile: (username: string) => void;
   onToast: (message: string, variant?: 'success' | 'error' | 'info') => void;
 }
@@ -80,6 +83,7 @@ export function AttendanceHub({
   isFirebaseAdmin = false,
   wsConnected,
   onAttendanceRecorded,
+  onAttendanceDeleted,
   onOpenMemberProfile,
   onToast,
 }: AttendanceHubProps) {
@@ -97,6 +101,8 @@ export function AttendanceHub({
   const [serialConnected, setSerialConnected] = useState(false);
   const [webNfcActive, setWebNfcActive] = useState(false);
   const [lastScannedBanner, setLastScannedBanner] = useState<ScannedBannerState | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const nfcInputRef = useRef<HTMLInputElement>(null);
 
   // QR Camera Scanner state
@@ -718,6 +724,55 @@ export function AttendanceHub({
     };
   }, [subTab, reportMonth, attendanceRecords, members]);
 
+  const handleDeleteAttendance = async (rec: AttendanceRecord, rowKey: string) => {
+    if (deletingKey) return;
+    setDeletingKey(rowKey);
+    try {
+      let deletedCloud = false;
+      if (rec.firestoreId) {
+        try {
+          await deleteAttendanceInFirestore(rec.firestoreId);
+          deletedCloud = true;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : '';
+          if (msg.includes('Missing or insufficient permissions') || msg.includes('PERMISSION_DENIED')) {
+            throw new Error(
+              'Tidak memiliki izin menghapus log ini di Firebase. Login dengan Google Admin untuk menghapus log buatan Admin.'
+            );
+          }
+          throw err;
+        }
+      }
+
+      if (getStoredToken() && rec.id > 0) {
+        try {
+          await apiFetch(`/api/attendance/${rec.id}`, { method: 'DELETE' });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message.toLowerCase() : '';
+          const notFoundInLocal = msg.includes('tidak ditemukan') || msg.includes('404');
+          if (!deletedCloud || !notFoundInLocal) {
+            throw err;
+          }
+        }
+      }
+
+      setLastScannedBanner((prev) => {
+        if (!prev) return prev;
+        const matchesBanner =
+          (Boolean(rec.firestoreId) && prev.firestoreDocId === rec.firestoreId) ||
+          (rec.id > 0 && prev.recordId === rec.id);
+        return matchesBanner ? null : prev;
+      });
+      onAttendanceDeleted?.(rec);
+      onToast(`Log kehadiran ${rec.full_name} berhasil dihapus.`, 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal menghapus log kehadiran.', 'error');
+    } finally {
+      setDeletingKey(null);
+      setConfirmDeleteKey((prev) => (prev === rowKey ? null : prev));
+    }
+  };
+
   const handleDownloadCsv = () => {
     const headers = [
       'NIS',
@@ -1193,6 +1248,8 @@ export function AttendanceHub({
 
             <div className="divide-y divide-slate-100 max-h-[540px] overflow-y-auto">
               {attendanceRecords.slice(0, 25).map((rec) => {
+                const rowKey = rec.firestoreId || `${rec.id}-${rec.attendance_date}-${rec.username}`;
+                const canDeleteLog = currentUser?.role === 'admin' || isFirebaseAdmin;
                 const memberMatch = members.find(
                   (m) => m.username === rec.username || m.id === rec.user_id
                 );
@@ -1223,7 +1280,7 @@ export function AttendanceHub({
 
                 return (
                   <div
-                    key={`${rec.id}-${rec.attendance_date}`}
+                    key={rowKey}
                     className="py-3 flex items-center justify-between gap-2.5 hover:bg-slate-50 rounded-lg px-2 transition-colors"
                   >
                     <button
@@ -1282,6 +1339,39 @@ export function AttendanceHub({
                           <MessageCircle className="w-3.5 h-3.5" />
                           <span className="hidden sm:inline">WA</span>
                         </a>
+                      )}
+
+                      {canDeleteLog && (
+                        confirmDeleteKey === rowKey ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              disabled={deletingKey === rowKey}
+                              onClick={() => handleDeleteAttendance(rec, rowKey)}
+                              className="px-2 py-1 text-[11px] font-semibold rounded-lg bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50 min-h-[32px]"
+                            >
+                              {deletingKey === rowKey ? '...' : 'Hapus'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deletingKey === rowKey}
+                              onClick={() => setConfirmDeleteKey(null)}
+                              className="px-2 py-1 text-[11px] font-medium rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-50 min-h-[32px]"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteKey(rowKey)}
+                            title={`Hapus log kehadiran ${rec.full_name}`}
+                            aria-label={`Hapus log kehadiran ${rec.full_name}`}
+                            className="inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg border border-transparent hover:border-rose-200 transition-colors min-h-[32px] min-w-[32px]"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )
                       )}
                     </div>
                   </div>

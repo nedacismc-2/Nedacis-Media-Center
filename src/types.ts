@@ -246,6 +246,7 @@ export interface AdminLmsTask extends Omit<LmsTask, 'progress' | 'submission'> {
 
 export type WSEvent =
   | { type: 'attendance:recorded'; payload: AttendanceRecord }
+  | { type: 'attendance:deleted'; payload: { id: number; firestoreId?: string; username?: string; attendance_date?: string } }
   | { type: 'notification:new'; payload: NotificationItem }
   | { type: 'work:created'; payload: StudentWork }
   | { type: 'work:deleted'; payload: { id: number } }
