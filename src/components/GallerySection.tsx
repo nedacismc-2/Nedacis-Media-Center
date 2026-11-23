@@ -12,6 +12,8 @@ import {
   Image as ImageIcon,
   Film,
   AlertCircle,
+  Link2,
+  CheckCircle2,
 } from 'lucide-react';
 import type { StudentProfile, StudentWork, WorkComment } from '../types';
 import { apiFetch, getStoredToken } from '../lib/api';
@@ -29,12 +31,19 @@ import {
   toggleWorkCommentsInFirestore,
   toggleWorkLikeInFirestore,
 } from '../lib/firestoreSync';
-import { formatTimeAgo, getInitials } from '../lib/mediaAssets';
+import {
+  extractGoogleDriveFileId,
+  formatTimeAgo,
+  getInitials,
+  normalizeWorkMediaUrl,
+} from '../lib/mediaAssets';
 import { CloudImage, CloudVideo } from './CloudMedia';
 
 interface GallerySectionProps {
   works: StudentWork[];
+  members?: StudentProfile[];
   currentUser: StudentProfile | null;
+  cloudSeeded?: boolean;
   selectedWork: StudentWork | null;
   onSelectWork: (work: StudentWork | null) => void;
   onOpenMemberProfile: (username: string) => void;
@@ -49,7 +58,9 @@ const CATEGORIES = ['Semua', 'Fotografi', 'Videografi', 'Desain Grafis', 'Liputa
 
 export function GallerySection({
   works,
+  members = [],
   currentUser,
+  cloudSeeded = false,
   selectedWork,
   onSelectWork,
   onOpenMemberProfile,
@@ -67,16 +78,18 @@ export function GallerySection({
     : currentUser?.username
     ? sanitizeDocId(`member_${currentUser.username}`)
     : undefined;
-  const effectiveActorId = auth.currentUser?.uid || memberDocId;
+  const effectiveActorId = (memberDocId?.startsWith('member_') ? memberDocId : '') || auth.currentUser?.uid || memberDocId;
 
   // Upload state
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState('Fotografi');
   const [description, setDescription] = useState('');
+  const [mediaSourceMode, setMediaSourceMode] = useState<'file' | 'link'>('file');
   const [file, setFile] = useState<File | null>(null);
   const [mediaUrlInput, setMediaUrlInput] = useState('');
   const [mediaTypeInput, setMediaTypeInput] = useState<'image' | 'video'>('image');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [linkPreviewError, setLinkPreviewError] = useState(false);
   const [uploading, setUploading] = useState(false);
 
   // Comment state
@@ -111,8 +124,23 @@ export function GallerySection({
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     if (selected) {
       setPreviewUrl(URL.createObjectURL(selected));
+      setMediaSourceMode('file');
+      setMediaUrlInput('');
+      setLinkPreviewError(false);
     } else {
       setPreviewUrl(null);
+    }
+  };
+
+  const handleMediaUrlChange = (val: string) => {
+    setMediaUrlInput(val);
+    setLinkPreviewError(false);
+    if (val.trim()) {
+      setMediaSourceMode('link');
+      if (file) handleFileChange(null);
+      if (extractGoogleDriveFileId(val)) {
+        setMediaTypeInput('image');
+      }
     }
   };
 
@@ -122,92 +150,144 @@ export function GallerySection({
       onRequireLogin();
       return;
     }
-    const cleanUrl = mediaUrlInput.trim();
-    if ((!file && !cleanUrl) || !title.trim()) {
-      onToast('Judul dan file atau tautan URL media wajib dilengkapi.', 'error');
+    const useLink = mediaSourceMode === 'link' || (!file && Boolean(mediaUrlInput.trim()));
+    const cleanUrl = useLink ? mediaUrlInput.trim() : '';
+    const activeFile = useLink ? null : file;
+
+    if ((!activeFile && !cleanUrl) || !title.trim()) {
+      onToast('Judul dan file media atau link gambar Google Drive wajib dilengkapi.', 'error');
+      return;
+    }
+
+    if (cleanUrl && !/^https?:\/\//i.test(cleanUrl)) {
+      onToast('Tautan media harus diawali dengan https:// atau http://.', 'error');
       return;
     }
 
     setUploading(true);
     try {
-      let resolvedMediaUrl = cleanUrl;
-      let resolvedMediaType: 'image' | 'video' = mediaTypeInput;
+      const resolvedMediaType: 'image' | 'video' = activeFile
+        ? activeFile.type.startsWith('video/')
+          ? 'video'
+          : 'image'
+        : mediaTypeInput;
+      let resolvedMediaUrl = cleanUrl ? normalizeWorkMediaUrl(cleanUrl, resolvedMediaType) : '';
       let createdWork: StudentWork | null = null;
-      let pendingApproval = currentUser.role !== 'admin';
+      const pendingApproval = currentUser.role !== 'admin';
 
-      if (file) {
-        resolvedMediaType = file.type.startsWith('video/') ? 'video' : 'image';
-        const uploaded = await uploadFileToCloud(file, {
-          isPublic: true,
-          uploaderMemberId: memberDocId,
-        });
-        resolvedMediaUrl = uploaded.cloudUrl;
-      }
+      if (cloudSeeded) {
+        try {
+          if (activeFile) {
+            const uploaded = await uploadFileToCloud(activeFile, {
+              isPublic: true,
+              uploaderMemberId: memberDocId,
+            });
+            resolvedMediaUrl = uploaded.cloudUrl;
+          }
 
-      if (resolvedMediaUrl) {
-        const fId = await createWorkInFirestore({
-          title: title.trim(),
-          description: description.trim(),
-          category,
-          mediaType: resolvedMediaType,
-          mediaUrl: resolvedMediaUrl,
-          authorName: currentUser.full_name,
-          authorUsername: currentUser.username,
-          authorMemberId: memberDocId,
-          authorKelas: currentUser.kelas,
-          authorDivision: currentUser.division,
-          authorAvatarColor: currentUser.avatar_color,
-          authorAvatarUrl: currentUser.avatar_url || '',
-          isAdminUploader: currentUser.role === 'admin',
-        });
+          if (resolvedMediaUrl) {
+            const fId = await createWorkInFirestore({
+              title: title.trim(),
+              description: description.trim(),
+              category,
+              mediaType: resolvedMediaType,
+              mediaUrl: resolvedMediaUrl,
+              authorName: currentUser.full_name,
+              authorUsername: currentUser.username,
+              authorMemberId: memberDocId,
+              authorKelas: currentUser.kelas,
+              authorDivision: currentUser.division,
+              authorAvatarColor: currentUser.avatar_color,
+              authorAvatarUrl: currentUser.avatar_url || '',
+              isAdminUploader: !pendingApproval,
+            });
 
-        createdWork = {
-          id: Date.now(),
-          firestoreId: fId,
-          authorUid: effectiveActorId || memberDocId,
-          user_id: currentUser.id,
-          author_name: currentUser.full_name,
-          author_username: currentUser.username,
-          author_kelas: currentUser.kelas,
-          author_division: currentUser.division,
-          author_avatar_color: currentUser.avatar_color,
-          author_avatar_url: currentUser.avatar_url,
-          title: title.trim(),
-          description: description.trim(),
-          category,
-          media_type: resolvedMediaType,
-          media_url: resolvedMediaUrl,
-          shares_count: 0,
-          comments_disabled: 0,
-          approval_status: currentUser.role === 'admin' ? 'approved' : 'pending',
-          created_at: new Date().toISOString(),
-          likes_count: 0,
-          comments_count: 0,
-          liked_by_me: false,
-          comments: [],
-        };
+            createdWork = {
+              id: Date.now(),
+              firestoreId: fId,
+              authorUid: effectiveActorId || memberDocId,
+              user_id: currentUser.id,
+              author_name: currentUser.full_name,
+              author_username: currentUser.username,
+              author_kelas: currentUser.kelas,
+              author_division: currentUser.division,
+              author_avatar_color: currentUser.avatar_color,
+              author_avatar_url: currentUser.avatar_url,
+              title: title.trim(),
+              description: description.trim(),
+              category,
+              media_type: resolvedMediaType,
+              media_url: resolvedMediaUrl,
+              shares_count: 0,
+              comments_disabled: 0,
+              approval_status: pendingApproval ? 'pending' : 'approved',
+              created_at: new Date().toISOString(),
+              likes_count: 0,
+              comments_count: 0,
+              liked_by_me: false,
+              comments: [],
+            };
 
-        if (getStoredToken()) {
-          const mirrorForm = new FormData();
-          mirrorForm.append('title', title.trim());
-          mirrorForm.append('category', category);
-          mirrorForm.append('description', description.trim());
-          if (file) mirrorForm.append('media', file);
-          void apiFetch('/api/works', { method: 'POST', body: mirrorForm }).catch(() => {});
+            if (getStoredToken()) {
+              void apiFetch('/api/works', {
+                method: 'POST',
+                body: JSON.stringify({
+                  title: title.trim(),
+                  category,
+                  description: description.trim(),
+                  media_url: resolvedMediaUrl,
+                  media_type: resolvedMediaType,
+                }),
+              }).catch(() => {});
+            }
+          }
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
         }
       }
 
-      if (!pendingApproval && createdWork) {
-        onWorkCreated(createdWork);
+      if (!createdWork && getStoredToken()) {
+        if (activeFile) {
+          const formData = new FormData();
+          formData.append('title', title.trim());
+          formData.append('category', category);
+          formData.append('description', description.trim());
+          formData.append('media', activeFile);
+          const res = await apiFetch<{ work: StudentWork }>('/api/works', {
+            method: 'POST',
+            body: formData,
+          });
+          createdWork = res.work;
+        } else if (resolvedMediaUrl) {
+          const res = await apiFetch<{ work: StudentWork }>('/api/works', {
+            method: 'POST',
+            body: JSON.stringify({
+              title: title.trim(),
+              category,
+              description: description.trim(),
+              media_url: resolvedMediaUrl,
+              media_type: resolvedMediaType,
+            }),
+          });
+          createdWork = res.work;
+        }
       }
+
+      if (!createdWork) {
+        throw new Error('Gagal mengunggah karya ke server.');
+      }
+
+      onWorkCreated(createdWork);
       setShowUploadModal(false);
       setTitle('');
       setDescription('');
       setMediaUrlInput('');
+      setLinkPreviewError(false);
+      setMediaSourceMode('file');
       handleFileChange(null);
       onToast(
         pendingApproval
-          ? 'Karya berhasil dikirim ke Firebase! Menunggu peninjauan Admin sebelum terposting di Beranda.'
+          ? 'Karya berhasil dikirim ke server & tersinkronisasi! Menunggu peninjauan Admin sebelum terposting di Beranda.'
           : 'Karya berhasil diterbitkan dan tersinkronisasi di Beranda & Galeri.',
         'success'
       );
@@ -474,29 +554,38 @@ export function GallerySection({
 
                   <p className="text-sm text-slate-600 line-clamp-2">{work.description}</p>
 
-                  <button
-                    type="button"
-                    onClick={() => onOpenMemberProfile(work.author_username)}
-                    className="pt-1 inline-flex items-center gap-2 text-left group"
-                  >
-                    {work.author_avatar_url ? (
-                      <CloudImage
-                        src={work.author_avatar_url}
-                        alt={work.author_name}
-                        className="w-7 h-7 rounded-full object-cover border border-slate-200 shrink-0"
-                      />
-                    ) : (
-                      <span
-                        className="w-7 h-7 rounded-full text-white text-[11px] font-semibold flex items-center justify-center shrink-0"
-                        style={{ backgroundColor: work.author_avatar_color || '#1D4ED8' }}
+                  {(() => {
+                    const liveAuthor = members.find(
+                      (m) => m.username.toLowerCase() === work.author_username.toLowerCase()
+                    );
+                    const authorAvatar = liveAuthor?.avatar_url || work.author_avatar_url;
+                    const authorColor = liveAuthor?.avatar_color || work.author_avatar_color || '#1D4ED8';
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => onOpenMemberProfile(work.author_username)}
+                        className="pt-1 inline-flex items-center gap-2 text-left group"
                       >
-                        {getInitials(work.author_name)}
-                      </span>
-                    )}
-                    <span className="text-xs font-medium text-slate-700 group-hover:text-[#1D4ED8]">
-                      {work.author_name} · Kelas {work.author_kelas}
-                    </span>
-                  </button>
+                        {authorAvatar ? (
+                          <CloudImage
+                            src={authorAvatar}
+                            alt={work.author_name}
+                            className="w-7 h-7 rounded-full object-cover border border-slate-200 shrink-0"
+                          />
+                        ) : (
+                          <span
+                            className="w-7 h-7 rounded-full text-white text-[11px] font-semibold flex items-center justify-center shrink-0"
+                            style={{ backgroundColor: authorColor }}
+                          >
+                            {getInitials(work.author_name)}
+                          </span>
+                        )}
+                        <span className="text-xs font-medium text-slate-700 group-hover:text-[#1D4ED8]">
+                          {work.author_name} · Kelas {work.author_kelas}
+                        </span>
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -617,57 +706,139 @@ export function GallerySection({
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                  Pilih File Media (Gambar JPG/PNG/WebP atau Video MP4/WebM, maks 15MB)
-                </label>
-                <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
-                  <div className="flex items-center gap-3 text-slate-500">
-                    <ImageIcon className="w-5 h-5" />
-                    <Film className="w-5 h-5" />
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs font-medium text-slate-700">
+                    Sumber Media Karya
+                  </label>
+                  <div className="inline-flex items-center p-1 bg-slate-100 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setMediaSourceMode('file')}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                        mediaSourceMode === 'file'
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <ImageIcon className="w-3.5 h-3.5" />
+                      Upload File
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMediaSourceMode('link')}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                        mediaSourceMode === 'link'
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <Link2 className="w-3.5 h-3.5" />
+                      Link Google Drive / URL
+                    </button>
                   </div>
-                  <span className="text-xs font-medium text-slate-700 text-center">
-                    {file ? file.name : 'Klik untuk memilih foto atau video dari perangkat'}
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/*,video/*"
-                    className="hidden"
-                    onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
-                  />
-                </label>
+                </div>
 
-                {previewUrl && file && (
-                  <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-48">
-                    {file.type.startsWith('video/') ? (
-                      <video src={previewUrl} controls className="w-full max-h-48 object-contain" />
+                {mediaSourceMode === 'file' ? (
+                  <>
+                    <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
+                      <div className="flex items-center gap-3 text-slate-500">
+                        <ImageIcon className="w-5 h-5" />
+                        <Film className="w-5 h-5" />
+                      </div>
+                      <span className="text-xs font-medium text-slate-700 text-center">
+                        {file ? file.name : 'Klik untuk memilih foto (JPG/PNG/WebP) atau video (MP4/WebM), maks 15MB'}
+                      </span>
+                      <input
+                        type="file"
+                        accept="image/*,video/*"
+                        className="hidden"
+                        onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
+                      />
+                    </label>
+
+                    {previewUrl && file && (
+                      <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-56">
+                        {file.type.startsWith('video/') ? (
+                          <video src={previewUrl} controls className="w-full max-h-56 object-contain" />
+                        ) : (
+                          <img src={previewUrl} alt="Pratinjau karya" className="w-full max-h-56 object-cover" />
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="space-y-3 bg-slate-50 border border-slate-200 rounded-xl p-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                      <div className="sm:col-span-8">
+                        <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                          Tautan Gambar Google Drive atau URL Media (HTTPS)
+                        </label>
+                        <input
+                          type="url"
+                          value={mediaUrlInput}
+                          onChange={(e) => handleMediaUrlChange(e.target.value)}
+                          placeholder="https://drive.google.com/file/d/.../view?usp=sharing"
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                        />
+                      </div>
+                      <div className="sm:col-span-4">
+                        <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                          Jenis Media
+                        </label>
+                        <select
+                          value={mediaTypeInput}
+                          onChange={(e) => setMediaTypeInput(e.target.value as 'image' | 'video')}
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                        >
+                          <option value="image">Foto / Gambar</option>
+                          <option value="video">Video</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {extractGoogleDriveFileId(mediaUrlInput) ? (
+                      <p className="flex items-start gap-1.5 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                        <span>
+                          Link Google Drive terdeteksi. Gambar akan ditampilkan otomatis seperti unggah foto biasa. Pastikan izin link di Google Drive diatur ke <strong>Siapa saja yang memiliki link (Viewer)</strong>.
+                        </span>
+                      </p>
                     ) : (
-                      <img src={previewUrl} alt="Pratinjau karya" className="w-full max-h-48 object-cover" />
+                      <p className="text-[11px] text-slate-500">
+                        Tempel link berbagi file gambar dari Google Drive (contoh: <code>https://drive.google.com/file/d/.../view</code>) atau tautan gambar HTTPS langsung.
+                      </p>
+                    )}
+
+                    {mediaUrlInput.trim() && /^https?:\/\//i.test(mediaUrlInput.trim()) && (
+                      <div className="space-y-1.5">
+                        <p className="text-[11px] font-medium text-slate-600">Pratinjau Otomatis:</p>
+                        <div className="rounded-xl overflow-hidden border border-slate-200 bg-white max-h-56 flex items-center justify-center">
+                          {mediaTypeInput === 'video' ? (
+                            <CloudVideo
+                              src={normalizeWorkMediaUrl(mediaUrlInput, 'video')}
+                              controls
+                              className="w-full max-h-56 object-contain"
+                            />
+                          ) : (
+                            <CloudImage
+                              src={normalizeWorkMediaUrl(mediaUrlInput, 'image')}
+                              alt="Pratinjau tautan gambar"
+                              className="w-full max-h-56 object-cover"
+                              onImageLoadSuccess={() => setLinkPreviewError(false)}
+                              onImageLoadFailed={() => setLinkPreviewError(true)}
+                            />
+                          )}
+                        </div>
+                        {linkPreviewError && (
+                          <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                            Gambar belum dapat dimuat di pratinjau. Periksa apakah tautan valid dan akses file di Google Drive sudah diubah menjadi <strong>Siapa saja yang memiliki link</strong>.
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
-
-                <div className="mt-3 grid grid-cols-1 sm:grid-cols-12 gap-2">
-                  <div className="sm:col-span-8">
-                    <input
-                      type="url"
-                      value={mediaUrlInput}
-                      onChange={(e) => setMediaUrlInput(e.target.value)}
-                      placeholder="Atau tempel URL foto/video HTTPS (opsional)"
-                      className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
-                    />
-                  </div>
-                  <div className="sm:col-span-4">
-                    <select
-                      value={mediaTypeInput}
-                      onChange={(e) => setMediaTypeInput(e.target.value as 'image' | 'video')}
-                      className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
-                    >
-                      <option value="image">Foto / Gambar</option>
-                      <option value="video">Video</option>
-                    </select>
-                  </div>
-                </div>
               </div>
 
               {currentUser?.role !== 'admin' && (

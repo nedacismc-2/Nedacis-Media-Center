@@ -12,7 +12,7 @@ import {
   writeBatch,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { auth, db, isQuotaExceededError, markFirestoreQuotaExceeded } from './firebase';
 import { resolveMediaUrl } from './mediaAssets';
 
 export const CLOUD_FILE_PREFIX = 'cloudfile://';
@@ -228,9 +228,11 @@ export async function uploadFileToCloud(
   file: File,
   options?: { isPublic?: boolean; maxDimension?: number; targetBytes?: number; uploaderMemberId?: string }
 ): Promise<CloudUploadResult> {
+  const cleanMemberId = options?.uploaderMemberId ? sanitizeUploaderId(options.uploaderMemberId) : '';
   const uid =
+    (cleanMemberId.startsWith('member_') ? cleanMemberId : '') ||
     auth.currentUser?.uid ||
-    (options?.uploaderMemberId ? sanitizeUploaderId(options.uploaderMemberId) : '');
+    cleanMemberId;
   if (!uid) {
     throw new Error('Silakan masuk ke akun anggota terlebih dahulu untuk mengunggah file ke Firebase.');
   }
@@ -373,6 +375,9 @@ export function subscribeUploadedFilesAdmin(
       });
     },
     (err) => {
+      if (isQuotaExceededError(err)) {
+        markFirestoreQuotaExceeded();
+      }
       options?.onError?.(err);
     }
   );

@@ -29,7 +29,17 @@ import type {
   StudentWork,
   WorkComment,
 } from '../types';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import {
+  auth,
+  db,
+  handleFirestoreError,
+  handleSnapshotError,
+  isFirestoreQuotaExceeded,
+  isQuotaExceededError,
+  markFirestoreQuotaExceeded,
+  OperationType,
+} from './firebase';
+import { normalizeWhatsappNumber } from './whatsappReport';
 
 function toIsoString(val: unknown): string {
   if (val instanceof Timestamp) {
@@ -101,6 +111,12 @@ export async function buildMemberAuthHashes(params: {
   return Array.from(set).slice(0, 6);
 }
 
+export async function buildNfcHash(nfcUid?: string): Promise<string> {
+  const clean = (nfcUid || '').trim().toUpperCase();
+  if (!clean) return '';
+  return sha256Hex(clean);
+}
+
 // ==================== SITE SETTINGS (BRANDING / HERO / FOOTER / SOCIAL) ====================
 
 export function subscribeSiteSettings(
@@ -126,7 +142,7 @@ export function subscribeSiteSettings(
         socialLinks: Array.isArray(d.socialLinks) ? (d.socialLinks as SocialLinkItem[]) : [],
       });
     },
-    (error) => handleFirestoreError(error, OperationType.GET, path)
+    (error) => handleSnapshotError(error, OperationType.GET, path)
   );
 }
 
@@ -198,7 +214,7 @@ export function subscribeNewsArticles(
       list.sort((a, b) => b.published_at.localeCompare(a.published_at));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -269,7 +285,7 @@ export function subscribeSchedules(
       list.sort((a, b) => `${a.event_date} ${a.start_time}`.localeCompare(`${b.event_date} ${b.start_time}`));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -362,6 +378,7 @@ export function subscribeMembersPublic(
           show_in_members: d.showInMembers ? 1 : 0,
           owner_uid: String(d.ownerUid || ''),
           auth_hashes: Array.isArray(d.authHashes) ? d.authHashes.map(String) : [],
+          nfc_hash: String(d.nfcHash || ''),
           created_at: toIsoString(d.createdAt),
           attendance_count: Number(d.attendanceCount || 0),
           works_count: Number(d.worksCount || 0),
@@ -374,7 +391,7 @@ export function subscribeMembersPublic(
       });
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -415,6 +432,7 @@ export async function verifyMemberLoginInFirestore(
         show_in_members: d.showInMembers ? 1 : 0,
         owner_uid: String(d.ownerUid || ''),
         auth_hashes: Array.isArray(d.authHashes) ? d.authHashes.map(String) : [],
+        nfc_hash: String(d.nfcHash || ''),
         created_at: toIsoString(d.createdAt),
         attendance_count: Number(d.attendanceCount || 0),
         works_count: Number(d.worksCount || 0),
@@ -455,23 +473,24 @@ export async function verifyMemberLoginInFirestore(
 }
 
 export function subscribeMembersPrivateAdmin(
-  onData: (privateMap: Map<string, { nis: string; nfc_uid: string }>) => void
+  onData: (privateMap: Map<string, { nis: string; nfc_uid: string; parent_whatsapp: string }>) => void
 ): Unsubscribe {
   const path = 'members_private';
   return onSnapshot(
     collection(db, path),
     (snap) => {
-      const map = new Map<string, { nis: string; nfc_uid: string }>();
+      const map = new Map<string, { nis: string; nfc_uid: string; parent_whatsapp: string }>();
       for (const docSnap of snap.docs) {
         const d = docSnap.data();
         map.set(docSnap.id, {
           nis: String(d.nis || ''),
           nfc_uid: String(d.nfcUid || ''),
+          parent_whatsapp: String(d.parentWhatsapp || ''),
         });
       }
       onData(map);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -487,6 +506,7 @@ export async function saveStudentToFirestore(params: {
   bio: string;
   nfc_uid: string;
   qr_code_token: string;
+  parent_whatsapp?: string;
   avatar_color: string;
   avatar_url?: string;
   show_in_members?: boolean;
@@ -497,7 +517,7 @@ export async function saveStudentToFirestore(params: {
   const privRef = doc(db, 'members_private', memberId);
 
   try {
-    const existingSnap = await getDoc(pubRef);
+    const [existingSnap, existingPrivSnap] = await Promise.all([getDoc(pubRef), getDoc(privRef)]);
     const existingHashes = existingSnap.exists() && Array.isArray(existingSnap.data().authHashes)
       ? (existingSnap.data().authHashes as string[])
       : [];
@@ -507,6 +527,14 @@ export async function saveStudentToFirestore(params: {
       password: params.password || (!existingSnap.exists() ? (params.role === 'admin' ? 'pembina123' : 'siswa123') : undefined),
       existingHashes,
     });
+    const nfcHash = await buildNfcHash(params.nfc_uid);
+    const existingParentWa = existingPrivSnap.exists()
+      ? String(existingPrivSnap.data().parentWhatsapp || '')
+      : '';
+    const resolvedParentWa =
+      params.parent_whatsapp !== undefined
+        ? normalizeWhatsappNumber(params.parent_whatsapp) || clampStr(params.parent_whatsapp, 30)
+        : existingParentWa;
 
     const batch = writeBatch(db);
     if (!existingSnap.exists()) {
@@ -525,6 +553,7 @@ export async function saveStudentToFirestore(params: {
         isVisible: true,
         ownerUid: '',
         authHashes,
+        ...(nfcHash ? { nfcHash } : {}),
         attendanceCount: 0,
         worksCount: 0,
         lmsPoints: 0,
@@ -532,16 +561,23 @@ export async function saveStudentToFirestore(params: {
         updatedAt: serverTimestamp(),
       });
     } else {
+      const existingData = existingSnap.data();
       batch.update(pubRef, {
         username: clampStr(params.username.toLowerCase(), 60),
+        role: params.role || (existingData.role === 'admin' ? 'admin' : 'student'),
         fullName: clampStr(params.full_name, 120),
         kelas: clampStr(params.kelas, 30),
         division: clampStr(params.division, 40),
         bio: clampStr(params.bio, 400),
         qrCodeToken: clampStr(params.qr_code_token, 60),
         avatarColor: clampStr(params.avatar_color || '#1D4ED8', 16),
-        avatarUrl: clampStr(params.avatar_url || '', 500),
+        avatarUrl: clampStr(params.avatar_url || String(existingData.avatarUrl || ''), 500),
+        showInMembers:
+          params.show_in_members !== undefined
+            ? params.show_in_members
+            : Boolean(existingData.showInMembers ?? true),
         authHashes,
+        ...(nfcHash ? { nfcHash } : {}),
         updatedAt: serverTimestamp(),
       });
     }
@@ -551,6 +587,7 @@ export async function saveStudentToFirestore(params: {
       ownerUid: existingSnap.exists() ? String(existingSnap.data().ownerUid || '') : '',
       nis: clampStr(params.nis, 40),
       nfcUid: clampStr(params.nfc_uid.toUpperCase(), 64),
+      parentWhatsapp: clampStr(resolvedParentWa, 30),
       email: '',
       updatedAt: serverTimestamp(),
     });
@@ -560,6 +597,244 @@ export async function saveStudentToFirestore(params: {
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `members_public/${memberId}`);
   }
+}
+
+export interface BulkStudentImportItem {
+  username: string;
+  role?: 'admin' | 'student';
+  full_name: string;
+  nis?: string;
+  kelas?: string;
+  division?: string;
+  bio?: string;
+  nfc_uid?: string;
+  qr_code_token?: string;
+  parent_whatsapp?: string;
+  avatar_color?: string;
+  show_in_members?: boolean;
+  password?: string;
+}
+
+export interface BulkImportSummary {
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+}
+
+export async function importStudentsToFirestore(
+  rows: BulkStudentImportItem[],
+  options: { overwrite: boolean; existingMembers?: StudentProfile[] }
+): Promise<BulkImportSummary> {
+  const existingMap = new Map<string, StudentProfile>();
+  for (const m of options.existingMembers || []) {
+    existingMap.set(m.username.trim().toLowerCase(), m);
+  }
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  type PendingWrite = {
+    isUpdate: boolean;
+    pubRef: ReturnType<typeof doc>;
+    privRef: ReturnType<typeof doc>;
+    pubData: Record<string, unknown>;
+    privData: Record<string, unknown>;
+  };
+
+  const pendingWrites: PendingWrite[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const raw = rows[i];
+    const cleanUsername = clampStr(raw.username.toLowerCase(), 60);
+    if (!cleanUsername || cleanUsername.length < 2 || !/^[a-zA-Z0-9._-]+$/.test(cleanUsername)) {
+      errors.push(`Baris ${i + 1}: username "${raw.username}" tidak valid.`);
+      continue;
+    }
+
+    const cachedExisting = existingMap.get(cleanUsername);
+    if (cachedExisting && !options.overwrite) {
+      skipped++;
+      continue;
+    }
+
+    const memberId = sanitizeDocId(`member_${cleanUsername}`);
+    const pubRef = doc(db, 'members_public', memberId);
+    const privRef = doc(db, 'members_private', memberId);
+
+    try {
+      const existingSnap = await getDoc(pubRef);
+      const existsInCloud = existingSnap.exists();
+      if (existsInCloud && !options.overwrite) {
+        skipped++;
+        continue;
+      }
+
+      const existingData = existsInCloud ? existingSnap.data() : {};
+      const role: 'admin' | 'student' =
+        raw.role === 'admin' || raw.role === 'student'
+          ? raw.role
+          : existingData.role === 'admin'
+          ? 'admin'
+          : 'student';
+
+      const fullName = clampStr(raw.full_name || String(existingData.fullName || ''), 120);
+      if (!fullName) {
+        errors.push(`Baris ${i + 1} (${cleanUsername}): nama lengkap wajib diisi.`);
+        continue;
+      }
+
+      const division = clampStr(raw.division || String(existingData.division || 'Fotografi'), 40) || 'Fotografi';
+      const kelas =
+        clampStr(raw.kelas || String(existingData.kelas || (role === 'admin' ? 'Pembina' : '8A')), 30) || '8A';
+      const bio = clampStr(
+        raw.bio !== undefined && raw.bio !== ''
+          ? raw.bio
+          : String(existingData.bio || `Anggota aktif Divisi ${division} NMC SMPN 2 Ciamis.`),
+        400
+      );
+
+      const randomSuffix = Math.random().toString(16).slice(2, 10).toUpperCase().padEnd(8, '0').slice(0, 8);
+      const resolvedNfc = clampStr(
+        (raw.nfc_uid || cachedExisting?.nfc_uid || `04${randomSuffix}`).toUpperCase(),
+        64
+      );
+      const resolvedQr = clampStr(
+        (raw.qr_code_token || String(existingData.qrCodeToken || '') || `NMC-${cleanUsername.toUpperCase().slice(0, 10)}`).toUpperCase(),
+        60
+      );
+      const resolvedNis = clampStr(raw.nis || cachedExisting?.nis || cleanUsername, 40) || cleanUsername;
+      const resolvedParentWa = clampStr(
+        normalizeWhatsappNumber(raw.parent_whatsapp || cachedExisting?.parent_whatsapp) ||
+          raw.parent_whatsapp ||
+          cachedExisting?.parent_whatsapp ||
+          '',
+        30
+      );
+      const avatarColor = /^#[0-9A-Fa-f]{6}$/.test((raw.avatar_color || '').trim())
+        ? (raw.avatar_color || '').trim().toUpperCase()
+        : String(existingData.avatarColor || '#1D4ED8');
+
+      const existingHashes = Array.isArray(existingData.authHashes)
+        ? (existingData.authHashes as string[])
+        : [];
+      const authHashes = await buildMemberAuthHashes({
+        qrCodeToken: resolvedQr,
+        nis: resolvedNis,
+        password: raw.password?.trim()
+          ? raw.password.trim()
+          : !existsInCloud
+          ? role === 'admin'
+            ? 'pembina123'
+            : 'siswa123'
+          : undefined,
+        existingHashes,
+      });
+      const nfcHash = await buildNfcHash(resolvedNfc);
+
+      if (!existsInCloud) {
+        pendingWrites.push({
+          isUpdate: false,
+          pubRef,
+          privRef,
+          pubData: {
+            legacyId: cachedExisting?.id ?? Date.now() + i,
+            username: cleanUsername,
+            role,
+            fullName,
+            kelas,
+            division,
+            bio,
+            qrCodeToken: resolvedQr,
+            avatarColor,
+            avatarUrl: clampStr(cachedExisting?.avatar_url || '', 500),
+            showInMembers: raw.show_in_members ?? true,
+            isVisible: true,
+            ownerUid: '',
+            authHashes,
+            ...(nfcHash ? { nfcHash } : {}),
+            attendanceCount: 0,
+            worksCount: 0,
+            lmsPoints: 0,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          privData: {
+            memberId,
+            ownerUid: '',
+            nis: resolvedNis,
+            nfcUid: resolvedNfc,
+            parentWhatsapp: resolvedParentWa,
+            email: '',
+            updatedAt: serverTimestamp(),
+          },
+        });
+      } else {
+        pendingWrites.push({
+          isUpdate: true,
+          pubRef,
+          privRef,
+          pubData: {
+            username: cleanUsername,
+            role,
+            fullName,
+            kelas,
+            division,
+            bio,
+            qrCodeToken: resolvedQr,
+            avatarColor,
+            avatarUrl: clampStr(String(existingData.avatarUrl || cachedExisting?.avatar_url || ''), 500),
+            showInMembers:
+              raw.show_in_members !== undefined
+                ? raw.show_in_members
+                : Boolean(existingData.showInMembers ?? true),
+            authHashes,
+            ...(nfcHash ? { nfcHash } : {}),
+            updatedAt: serverTimestamp(),
+          },
+          privData: {
+            memberId,
+            ownerUid: String(existingData.ownerUid || ''),
+            nis: resolvedNis,
+            nfcUid: resolvedNfc,
+            parentWhatsapp: resolvedParentWa,
+            email: '',
+            updatedAt: serverTimestamp(),
+          },
+        });
+      }
+    } catch (err) {
+      errors.push(`Baris ${i + 1} (${cleanUsername}): ${err instanceof Error ? err.message : 'Gagal validasi Cloud.'}`);
+    }
+  }
+
+  // Commit in chunks of 100 members (200 Firestore writes per batch, safe below 500-op cap)
+  const CHUNK_SIZE = 100;
+  for (let start = 0; start < pendingWrites.length; start += CHUNK_SIZE) {
+    const chunk = pendingWrites.slice(start, start + CHUNK_SIZE);
+    const batch = writeBatch(db);
+    for (const item of chunk) {
+      if (item.isUpdate) {
+        batch.update(item.pubRef, item.pubData);
+      } else {
+        batch.set(item.pubRef, item.pubData);
+      }
+      batch.set(item.privRef, item.privData);
+    }
+    try {
+      await batch.commit();
+      for (const item of chunk) {
+        if (item.isUpdate) updated++;
+        else created++;
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'members_public/batch_import');
+    }
+  }
+
+  return { created, updated, skipped, errors };
 }
 
 export async function deleteStudentFromFirestore(memberId: string): Promise<void> {
@@ -619,8 +894,98 @@ export function subscribeWorks(
       list.sort((a, b) => b.created_at.localeCompare(a.created_at));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
+}
+
+export function subscribeMyWorks(
+  uid: string,
+  memberId: string,
+  onData: (works: StudentWork[]) => void
+): Unsubscribe {
+  const path = 'works';
+  const cleanMemberId = memberId ? sanitizeDocId(memberId) : '';
+  const actorIds = Array.from(new Set([uid, cleanMemberId].filter(Boolean)));
+  if (actorIds.length === 0) {
+    onData([]);
+    return () => {};
+  }
+
+  const mapWorkDoc = (docSnap: { id: string; data: () => Record<string, unknown> }): StudentWork => {
+    const d = docSnap.data();
+    return {
+      id: Number(d.legacyId) || deterministicNumericId(docSnap.id),
+      firestoreId: docSnap.id,
+      authorUid: String(d.authorUid || ''),
+      user_id: 0,
+      title: String(d.title || ''),
+      description: String(d.description || ''),
+      category: String(d.category || 'Fotografi'),
+      media_type: d.mediaType === 'video' ? 'video' : 'image',
+      media_url: String(d.mediaUrl || ''),
+      shares_count: Number(d.sharesCount || 0),
+      comments_disabled: d.commentsDisabled ? 1 : 0,
+      approval_status: (d.approvalStatus as StudentWork['approval_status']) || 'pending',
+      review_note: String(d.reviewNote || ''),
+      created_at: toIsoString(d.createdAt),
+      author_name: String(d.authorName || ''),
+      author_username: String(d.authorUsername || ''),
+      author_kelas: String(d.authorKelas || ''),
+      author_division: String(d.authorDivision || ''),
+      author_avatar_color: String(d.authorAvatarColor || '#1D4ED8'),
+      author_avatar_url: String(d.authorAvatarUrl || ''),
+      likes_count: Number(d.likesCount || 0),
+      comments_count: Number(d.commentsCount || 0),
+      liked_by_me: false,
+      comments: [],
+    };
+  };
+
+  const byUid = new Map<string, StudentWork>();
+  const byMember = new Map<string, StudentWork>();
+  const emitMerged = () => {
+    const merged = new Map<string, StudentWork>();
+    byUid.forEach((v, k) => merged.set(k, v));
+    byMember.forEach((v, k) => merged.set(k, v));
+    const list = Array.from(merged.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    onData(list);
+  };
+
+  const unsubs: Unsubscribe[] = [];
+  if (uid) {
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, path), where('authorUid', '==', uid)),
+        (snap) => {
+          byUid.clear();
+          for (const docSnap of snap.docs) {
+            byUid.set(docSnap.id, mapWorkDoc(docSnap));
+          }
+          emitMerged();
+        },
+        (error) => handleSnapshotError(error, OperationType.LIST, path)
+      )
+    );
+  }
+  if (cleanMemberId && cleanMemberId !== uid) {
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, path), where('authorMemberId', '==', cleanMemberId)),
+        (snap) => {
+          byMember.clear();
+          for (const docSnap of snap.docs) {
+            byMember.set(docSnap.id, mapWorkDoc(docSnap));
+          }
+          emitMerged();
+        },
+        (error) => handleSnapshotError(error, OperationType.LIST, path)
+      )
+    );
+  }
+
+  return () => {
+    unsubs.forEach((u) => u());
+  };
 }
 
 export async function createWorkInFirestore(params: {
@@ -896,7 +1261,7 @@ export function subscribeWorkComments(
       list.sort((a, b) => a.created_at.localeCompare(b.created_at));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -938,7 +1303,7 @@ export function subscribePendingWorksAdmin(onData: (works: StudentWork[]) => voi
       list.sort((a, b) => b.created_at.localeCompare(a.created_at));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -961,10 +1326,14 @@ export function subscribeAttendanceRecords(
       user_id: 0,
       attendance_date: String(d.attendanceDate || ''),
       check_in_time: String(d.checkInTime || ''),
+      check_out_time: String(d.checkOutTime || ''),
       method: (d.method as AttendanceRecord['method']) || 'NFC/RFID',
+      check_out_method: (d.checkOutMethod as AttendanceRecord['check_out_method']) || '',
       status: (d.status as AttendanceRecord['status']) || 'Hadir',
       session_title: String(d.sessionTitle || ''),
       recorded_by: String(d.recordedBy || ''),
+      wa_notified_in: Boolean(d.waNotifiedIn),
+      wa_notified_out: Boolean(d.waNotifiedOut),
       created_at: toIsoString(d.createdAt),
       full_name: String(d.fullName || ''),
       username: String(d.username || ''),
@@ -983,7 +1352,7 @@ export function subscribeAttendanceRecords(
         list.sort((a, b) => `${b.attendance_date} ${b.check_in_time}`.localeCompare(`${a.attendance_date} ${a.check_in_time}`));
         onData(list);
       },
-      (error) => handleFirestoreError(error, OperationType.LIST, path)
+      (error) => handleSnapshotError(error, OperationType.LIST, path)
     );
   }
 
@@ -1011,7 +1380,7 @@ export function subscribeAttendanceRecords(
           }
           emitMerged();
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, path)
+        (error) => handleSnapshotError(error, OperationType.LIST, path)
       )
     );
   }
@@ -1027,7 +1396,7 @@ export function subscribeAttendanceRecords(
           }
           emitMerged();
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, path)
+        (error) => handleSnapshotError(error, OperationType.LIST, path)
       )
     );
   }
@@ -1035,6 +1404,19 @@ export function subscribeAttendanceRecords(
   return () => {
     unsubs.forEach((u) => u());
   };
+}
+
+export interface RecordedAttendanceCloudResult {
+  docId: string;
+  actionType: 'check_in' | 'check_out';
+  checkInTime: string;
+  checkOutTime: string;
+  method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
+  checkOutMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '';
+  status: 'Hadir' | 'Terlambat' | 'Izin';
+  sessionTitle: string;
+  waNotifiedIn: boolean;
+  waNotifiedOut: boolean;
 }
 
 export async function recordAttendanceInFirestore(params: {
@@ -1046,20 +1428,40 @@ export async function recordAttendanceInFirestore(params: {
   division: string;
   attendanceDate: string;
   checkInTime: string;
+  attendanceMode?: 'auto' | 'check_in' | 'check_out';
   method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
   status: 'Hadir' | 'Terlambat' | 'Izin';
   sessionTitle: string;
   recordedBy: string;
   recordedByUid?: string;
-}): Promise<void> {
-  const uid = auth.currentUser?.uid || (params.recordedByUid ? sanitizeDocId(params.recordedByUid) : '');
+}): Promise<RecordedAttendanceCloudResult> {
+  const uid =
+    (params.recordedByUid ? sanitizeDocId(params.recordedByUid) : '') || auth.currentUser?.uid || '';
   if (!uid) throw new Error('Masuk sebagai Admin atau Pembina untuk mencatat absensi ke Firebase.');
   const memberDocId = sanitizeDocId(params.memberId);
   const docId = sanitizeDocId(`att_${memberDocId}_${params.attendanceDate}`);
   const ref = doc(db, 'attendance_records', docId);
+  const mode = params.attendanceMode || 'auto';
+  const scanTime = clampStr(params.checkInTime, 20);
+
   try {
     const existing = await getDoc(ref);
+    let actionType: 'check_in' | 'check_out' = 'check_in';
+    let finalCheckInTime = scanTime;
+    let finalCheckOutTime = '';
+    let finalMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' = params.method;
+    let finalCheckOutMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '' = '';
+    let finalStatus: 'Hadir' | 'Terlambat' | 'Izin' = params.status;
+    let finalSessionTitle = clampStr(params.sessionTitle, 180);
+    let finalWaIn = false;
+    let finalWaOut = false;
+
     if (!existing.exists()) {
+      if (mode === 'check_out') {
+        actionType = 'check_out';
+        finalCheckOutTime = scanTime;
+        finalCheckOutMethod = params.method;
+      }
       await setDoc(ref, {
         memberId: memberDocId,
         studentUid: clampStr(params.studentUid || '', 128),
@@ -1068,41 +1470,107 @@ export async function recordAttendanceInFirestore(params: {
         kelas: clampStr(params.kelas, 30),
         division: clampStr(params.division, 40),
         attendanceDate: clampStr(params.attendanceDate, 20),
-        checkInTime: clampStr(params.checkInTime, 20),
-        method: params.method,
-        status: params.status,
-        sessionTitle: clampStr(params.sessionTitle, 180),
+        checkInTime: finalCheckInTime,
+        ...(finalCheckOutTime ? { checkOutTime: finalCheckOutTime, checkOutMethod: finalCheckOutMethod } : {}),
+        method: finalMethod,
+        status: finalStatus,
+        sessionTitle: finalSessionTitle,
         recordedBy: clampStr(params.recordedBy, 120),
         recordedByUid: uid,
+        waNotifiedIn: false,
+        waNotifiedOut: false,
         createdAt: serverTimestamp(),
       });
     } else {
-      await updateDoc(ref, {
-        checkInTime: clampStr(params.checkInTime, 20),
-        method: params.method,
-        status: params.status,
-        sessionTitle: clampStr(params.sessionTitle, 180),
-        recordedBy: clampStr(params.recordedBy, 120),
-        recordedByUid: uid,
-      });
+      const existingData = existing.data();
+      finalWaIn = Boolean(existingData.waNotifiedIn);
+      finalWaOut = Boolean(existingData.waNotifiedOut);
+
+      if (mode === 'check_in') {
+        actionType = 'check_in';
+        finalCheckInTime = scanTime;
+        finalCheckOutTime = String(existingData.checkOutTime || '');
+        finalCheckOutMethod = (existingData.checkOutMethod as 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '') || '';
+        await updateDoc(ref, {
+          checkInTime: finalCheckInTime,
+          method: finalMethod,
+          status: finalStatus,
+          sessionTitle: finalSessionTitle,
+          recordedBy: clampStr(params.recordedBy, 120),
+          recordedByUid: uid,
+        });
+      } else {
+        // 'auto' (when checkIn already exists) or explicit 'check_out' -> record Absen Pulang
+        actionType = 'check_out';
+        finalCheckInTime = String(existingData.checkInTime || scanTime);
+        finalMethod = (existingData.method as 'NFC/RFID' | 'QR Scan' | 'Manual Admin') || params.method;
+        finalCheckOutTime = scanTime;
+        finalCheckOutMethod = params.method;
+        finalStatus = (existingData.status as 'Hadir' | 'Terlambat' | 'Izin') || params.status;
+        finalSessionTitle = String(existingData.sessionTitle || finalSessionTitle);
+        await updateDoc(ref, {
+          checkOutTime: finalCheckOutTime,
+          checkOutMethod: finalCheckOutMethod,
+          recordedBy: clampStr(params.recordedBy, 120),
+          recordedByUid: uid,
+        });
+      }
     }
 
     // Automatically push real-time attendance notification to student account across all devices
     const notifId = sanitizeDocId(`notif_att_${memberDocId}_${params.attendanceDate}_${Date.now()}`);
+    const notifTitle =
+      actionType === 'check_out'
+        ? 'Absen Pulang Tercatat'
+        : `Absen Masuk Tercatat (${finalStatus})`;
+    const notifBody =
+      actionType === 'check_out'
+        ? `${finalSessionTitle} · Absen Pulang (${finalCheckOutMethod || params.method}) pukul ${finalCheckOutTime} oleh ${params.recordedBy}`
+        : `${finalSessionTitle} · Absen Masuk (${finalMethod}) pukul ${finalCheckInTime} oleh ${params.recordedBy}`;
     await setDoc(doc(db, 'notifications', notifId), {
       targetUid: memberDocId,
       type: 'attendance',
-      title: clampStr(`Absensi Tercatat (${params.status})`, 160),
-      message: clampStr(
-        `${params.sessionTitle} · ${params.method} pukul ${params.checkInTime} oleh ${params.recordedBy}`,
-        600
-      ),
+      title: clampStr(notifTitle, 160),
+      message: clampStr(notifBody, 600),
       linkTarget: clampStr(`profil/${params.username}`, 120),
       isRead: false,
       createdAt: serverTimestamp(),
     }).catch(() => {});
+
+    return {
+      docId,
+      actionType,
+      checkInTime: finalCheckInTime,
+      checkOutTime: finalCheckOutTime,
+      method: finalMethod,
+      checkOutMethod: finalCheckOutMethod,
+      status: finalStatus,
+      sessionTitle: finalSessionTitle,
+      waNotifiedIn: finalWaIn,
+      waNotifiedOut: finalWaOut,
+    };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `attendance_records/${docId}`);
+  }
+}
+
+export async function markAttendanceWaNotifiedInFirestore(
+  docId: string,
+  actionType: 'check_in' | 'check_out',
+  recordedByUid?: string
+): Promise<void> {
+  if (!docId) return;
+  const uid =
+    (recordedByUid ? sanitizeDocId(recordedByUid) : '') || auth.currentUser?.uid || '';
+  if (!uid) return;
+  const ref = doc(db, 'attendance_records', docId);
+  try {
+    await updateDoc(ref, {
+      ...(actionType === 'check_out' ? { waNotifiedOut: true } : { waNotifiedIn: true }),
+      recordedByUid: uid,
+    });
+  } catch {
+    // Non-fatal marker update
   }
 }
 
@@ -1280,10 +1748,14 @@ export function subscribeLmsTasks(
         adminTasks.sort((a, b) => b.created_at.localeCompare(a.created_at));
         onData(tasks, adminTasks);
       } catch (err) {
-        handleFirestoreError(err, OperationType.GET, path);
+        if (isQuotaExceededError(err)) {
+          markFirestoreQuotaExceeded();
+          return;
+        }
+        handleSnapshotError(err, OperationType.GET, path);
       }
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -1490,7 +1962,7 @@ export function subscribeBlockedWords(
         .sort((a, b) => a.word.localeCompare(b.word));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -1536,6 +2008,34 @@ export async function updateMemberAvatarInFirestore(
   }
 }
 
+export async function updateMemberProfileInFirestore(
+  memberId: string,
+  updates: {
+    avatarUrl?: string;
+    bio?: string;
+    division?: string;
+  }
+): Promise<void> {
+  const path = `members_public/${memberId}`;
+  const payload: Record<string, unknown> = {
+    updatedAt: serverTimestamp(),
+  };
+  if (updates.avatarUrl !== undefined) {
+    payload.avatarUrl = clampStr(updates.avatarUrl, 500);
+  }
+  if (updates.bio !== undefined) {
+    payload.bio = clampStr(updates.bio, 400);
+  }
+  if (updates.division !== undefined && updates.division.trim()) {
+    payload.division = clampStr(updates.division, 40);
+  }
+  try {
+    await updateDoc(doc(db, 'members_public', memberId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 // ==================== NOTIFICATIONS ====================
 
 export function subscribeNotificationsFirestore(
@@ -1571,7 +2071,7 @@ export function subscribeNotificationsFirestore(
       list.sort((a, b) => b.created_at.localeCompare(a.created_at));
       onData(list);
     },
-    (error) => handleFirestoreError(error, OperationType.LIST, path)
+    (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
 }
 
@@ -1586,7 +2086,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
   lmsTasks?: LmsTask[];
 }): Promise<boolean> {
   const uid = auth.currentUser?.uid;
-  if (!uid) return false;
+  if (!uid || isFirestoreQuotaExceeded()) return false;
 
   try {
     const portalSnap = await getDoc(doc(db, 'site_settings', 'portal'));
@@ -1634,6 +2134,8 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         nis: m.nis || `NIS-${m.id}`,
         password: defaultPass,
       });
+      const rawNfcUid = clampStr(m.nfc_uid || `04NMC${m.id}`, 64);
+      const nfcHash = await buildNfcHash(rawNfcUid);
       batch.set(doc(db, 'members_public', memberId), {
         legacyId: m.id,
         username: clampStr(m.username, 60),
@@ -1649,6 +2151,7 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         isVisible: true,
         ownerUid: '',
         authHashes,
+        ...(nfcHash ? { nfcHash } : {}),
         attendanceCount: Number(m.attendance_count || 0),
         worksCount: Number(m.works_count || 0),
         lmsPoints: Number(m.lms_points || 0),
@@ -1659,7 +2162,8 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
         memberId,
         ownerUid: '',
         nis: clampStr(m.nis || `NIS-${m.id}`, 40),
-        nfcUid: clampStr(m.nfc_uid || `04NMC${m.id}`, 64),
+        nfcUid: rawNfcUid,
+        parentWhatsapp: clampStr(m.parent_whatsapp || '', 30),
         email: '',
         updatedAt: serverTimestamp(),
       });
@@ -1762,6 +2266,10 @@ export async function seedCloudPortalIfEmpty(bootstrapData: {
     await batch.commit();
     return true;
   } catch (error) {
+    if (isQuotaExceededError(error)) {
+      markFirestoreQuotaExceeded();
+      return false;
+    }
     handleFirestoreError(error, OperationType.WRITE, 'site_settings/portal');
   }
 }
@@ -1774,9 +2282,14 @@ function replaceMmcText(text: string): string {
     .replace(/\bMMC\b/g, 'NMC');
 }
 
-export async function syncMemberAuthHashesAdmin(): Promise<void> {
+const AUTH_REBRAND_SYNC_KEY = 'nmc_auth_rebrand_sync_v1';
+
+export async function syncMemberAuthHashesAdmin(force = false): Promise<void> {
   if (!auth.currentUser?.uid) return;
   try {
+    if (!force && typeof window !== 'undefined' && localStorage.getItem(AUTH_REBRAND_SYNC_KEY) === 'done') {
+      return;
+    }
     const [pubSnap, privSnap, newsSnap, schedSnap, worksSnap, tasksSnap] = await Promise.all([
       getDocs(collection(db, 'members_public')),
       getDocs(collection(db, 'members_private')),
@@ -1785,9 +2298,12 @@ export async function syncMemberAuthHashesAdmin(): Promise<void> {
       getDocs(collection(db, 'works')),
       getDocs(collection(db, 'lms_tasks')),
     ]);
-    const nisMap = new Map<string, string>();
+    const privMap = new Map<string, { nis: string; nfcUid: string }>();
     for (const p of privSnap.docs) {
-      nisMap.set(p.id, String(p.data().nis || ''));
+      privMap.set(p.id, {
+        nis: String(p.data().nis || ''),
+        nfcUid: String(p.data().nfcUid || ''),
+      });
     }
 
     const batch = writeBatch(db);
@@ -1803,14 +2319,18 @@ export async function syncMemberAuthHashesAdmin(): Promise<void> {
       const role = d.role === 'admin' ? 'admin' : 'student';
       const username = String(d.username || '');
       const defaultPass = username === 'admin' ? 'adminmmc' : role === 'admin' ? 'pembina123' : 'siswa123';
+      const priv = privMap.get(mDoc.id);
+      const expectedNfcHash = priv?.nfcUid ? await buildNfcHash(priv.nfcUid) : '';
+      const currentNfcHash = String(d.nfcHash || '');
 
       const needsHashSync = existingHashes.length === 0 || nextQr !== currentQr;
+      const needsNfcHashSync = Boolean(expectedNfcHash) && currentNfcHash !== expectedNfcHash;
       const needsRebrand = nextBio !== currentBio || nextQr !== currentQr;
 
-      if (needsHashSync || needsRebrand) {
+      if (needsHashSync || needsNfcHashSync || needsRebrand) {
         const hashes = await buildMemberAuthHashes({
           qrCodeToken: nextQr,
-          nis: nisMap.get(mDoc.id) || '',
+          nis: priv?.nis || '',
           password: defaultPass,
           existingHashes,
         });
@@ -1818,6 +2338,7 @@ export async function syncMemberAuthHashesAdmin(): Promise<void> {
           bio: clampStr(nextBio, 400),
           qrCodeToken: clampStr(nextQr || `NMC-${username.toUpperCase().slice(0, 8)}`, 60),
           authHashes: hashes,
+          ...(expectedNfcHash ? { nfcHash: expectedNfcHash } : {}),
           updatedAt: serverTimestamp(),
         });
         pendingUpdates++;
@@ -1917,7 +2438,13 @@ export async function syncMemberAuthHashesAdmin(): Promise<void> {
     if (pendingUpdates > 0) {
       await batch.commit();
     }
-  } catch {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(AUTH_REBRAND_SYNC_KEY, 'done');
+    }
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      markFirestoreQuotaExceeded();
+    }
     // Non-fatal background sync
   }
 }

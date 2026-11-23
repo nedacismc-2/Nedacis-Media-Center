@@ -330,6 +330,22 @@ export function initDatabase() {
   if (!userCols.some((c) => c.name === 'show_in_members')) {
     db.exec(`ALTER TABLE users ADD COLUMN show_in_members INTEGER NOT NULL DEFAULT 0`);
   }
+  if (!userCols.some((c) => c.name === 'parent_whatsapp')) {
+    db.exec(`ALTER TABLE users ADD COLUMN parent_whatsapp TEXT NOT NULL DEFAULT ''`);
+  }
+  const attCols = db.prepare(`PRAGMA table_info(attendance_records)`).all() as Array<{ name: string }>;
+  if (!attCols.some((c) => c.name === 'check_out_time')) {
+    db.exec(`ALTER TABLE attendance_records ADD COLUMN check_out_time TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!attCols.some((c) => c.name === 'check_out_method')) {
+    db.exec(`ALTER TABLE attendance_records ADD COLUMN check_out_method TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!attCols.some((c) => c.name === 'wa_notified_in')) {
+    db.exec(`ALTER TABLE attendance_records ADD COLUMN wa_notified_in INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!attCols.some((c) => c.name === 'wa_notified_out')) {
+    db.exec(`ALTER TABLE attendance_records ADD COLUMN wa_notified_out INTEGER NOT NULL DEFAULT 0`);
+  }
   const workCols = db.prepare(`PRAGMA table_info(works)`).all() as Array<{ name: string }>;
   if (!workCols.some((c) => c.name === 'approval_status')) {
     db.exec(`ALTER TABLE works ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'`);

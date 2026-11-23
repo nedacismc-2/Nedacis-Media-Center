@@ -11,6 +11,8 @@ import {
   Clock,
   Film,
   Image as ImageIcon,
+  Link2,
+  PenLine,
   Plus,
   QrCode,
   Search,
@@ -22,8 +24,14 @@ import { apiFetch, getStoredToken } from '../lib/api';
 import { auth } from '../lib/firebase';
 import { uploadFileToCloud } from '../lib/cloudFiles';
 import { useFirebase } from '../context/FirebaseContext';
-import { createWorkInFirestore, sanitizeDocId, updateMemberAvatarInFirestore } from '../lib/firestoreSync';
-import { formatDateID, getInitials, getLocalTimeZoneLabel } from '../lib/mediaAssets';
+import { createWorkInFirestore, sanitizeDocId, updateMemberProfileInFirestore } from '../lib/firestoreSync';
+import {
+  extractGoogleDriveFileId,
+  formatDateID,
+  getInitials,
+  getLocalTimeZoneLabel,
+  normalizeWorkMediaUrl,
+} from '../lib/mediaAssets';
 import { CloudImage, CloudVideo } from './CloudMedia';
 import { QrCodeDisplay } from './QrCodeDisplay';
 
@@ -32,6 +40,7 @@ interface MembersSectionProps {
   allWorks?: StudentWork[];
   allAttendance?: AttendanceRecord[];
   currentUser: StudentProfile | null;
+  cloudSeeded?: boolean;
   lmsTasks?: LmsTask[];
   selectedUsername: string | null;
   onSelectUsername: (username: string | null) => void;
@@ -39,17 +48,20 @@ interface MembersSectionProps {
   onOpenTasks?: (taskId?: number) => void;
   onUserUpdated: (user: StudentProfile) => void;
   onWorkApprovedOrAdminCreated: (work: StudentWork) => void;
+  onWorkPendingCreated?: (work: StudentWork) => void;
   onToast: (message: string, variant?: 'success' | 'error' | 'info') => void;
   latestAttendanceEvent: AttendanceRecord | null;
 }
 
 const DIVISIONS = ['Semua', 'Pembina', 'Fotografi', 'Videografi', 'Jurnalistik', 'Desain Grafis', 'Penyiaran'];
+const EDITABLE_DIVISIONS = ['Fotografi', 'Videografi', 'Jurnalistik', 'Desain Grafis', 'Penyiaran'];
 
 export function MembersSection({
   members,
   allWorks = [],
   allAttendance = [],
   currentUser,
+  cloudSeeded = false,
   lmsTasks = [],
   selectedUsername,
   onSelectUsername,
@@ -57,6 +69,7 @@ export function MembersSection({
   onOpenTasks,
   onUserUpdated,
   onWorkApprovedOrAdminCreated,
+  onWorkPendingCreated,
   onToast,
   latestAttendanceEvent,
 }: MembersSectionProps) {
@@ -84,14 +97,28 @@ export function MembersSection({
   // Avatar upload state
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
+  // Inline bio & division editing state
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [editBio, setEditBio] = useState('');
+  const [editDivision, setEditDivision] = useState('Fotografi');
+  const [savingProfile, setSavingProfile] = useState(false);
+
   // Student work upload modal from profile
   const [showWorkModal, setShowWorkModal] = useState(false);
   const [workTitle, setWorkTitle] = useState('');
   const [workCategory, setWorkCategory] = useState('Fotografi');
   const [workDesc, setWorkDesc] = useState('');
+  const [workSourceMode, setWorkSourceMode] = useState<'file' | 'link'>('file');
   const [workFile, setWorkFile] = useState<File | null>(null);
+  const [workMediaUrl, setWorkMediaUrl] = useState('');
+  const [workMediaType, setWorkMediaType] = useState<'image' | 'video'>('image');
   const [workPreviewUrl, setWorkPreviewUrl] = useState<string | null>(null);
+  const [workLinkPreviewError, setWorkLinkPreviewError] = useState(false);
   const [uploadingWork, setUploadingWork] = useState(false);
+
+  useEffect(() => {
+    setEditingProfile(false);
+  }, [selectedUsername]);
 
   useEffect(() => {
     if (!selectedUsername) {
@@ -124,10 +151,36 @@ export function MembersSection({
     )
       .then((res) => {
         if (!active) return;
+        const mergedWorksMap = new Map<string, StudentWork>();
+        for (const w of cloudWorks) {
+          mergedWorksMap.set(w.media_url || w.firestoreId || String(w.id), w);
+        }
+        for (const sw of res.works || []) {
+          const key = sw.media_url || String(sw.id);
+          if (!mergedWorksMap.has(key)) {
+            mergedWorksMap.set(key, sw);
+          }
+        }
+        const mergedWorks = Array.from(mergedWorksMap.values()).sort((a, b) =>
+          (b.created_at || '').localeCompare(a.created_at || '')
+        );
+        const preferredAvatar =
+          (cloudMember?.avatar_url?.startsWith('cloudfile://') ? cloudMember.avatar_url : '') ||
+          (res.member.avatar_url?.startsWith('cloudfile://') ? res.member.avatar_url : '') ||
+          cloudMember?.avatar_url ||
+          res.member.avatar_url ||
+          '';
         setProfileDetail({
-          member: cloudMember ? { ...res.member, ...cloudMember, nis: cloudMember.nis || res.member.nis } : res.member,
+          member: cloudMember
+            ? {
+                ...res.member,
+                ...cloudMember,
+                avatar_url: preferredAvatar,
+                nis: cloudMember.nis || res.member.nis,
+              }
+            : res.member,
           attendanceHistory: cloudAtt.length > 0 ? cloudAtt : res.attendanceHistory,
-          works: cloudWorks.length > 0 ? cloudWorks : res.works,
+          works: mergedWorks,
         });
       })
       .catch(() => {
@@ -176,29 +229,49 @@ export function MembersSection({
     setUploadingAvatar(true);
     try {
       const targetMemberId = profileDetail?.member.firestoreId || currentMemberDocId;
-      const uploaded = await uploadFileToCloud(file, {
-        isPublic: true,
-        maxDimension: 600,
-        uploaderMemberId: currentMemberDocId,
-      });
+      let nextAvatarUrl = '';
 
-      if (auth.currentUser) {
-        await updateCloudUserPhoto(uploaded.cloudUrl).catch(() => {});
+      if (cloudSeeded && targetMemberId && targetMemberId.startsWith('member_')) {
+        try {
+          const uploaded = await uploadFileToCloud(file, {
+            isPublic: true,
+            maxDimension: 600,
+            uploaderMemberId: currentMemberDocId,
+          });
+          nextAvatarUrl = uploaded.cloudUrl;
+          await updateMemberProfileInFirestore(targetMemberId, { avatarUrl: nextAvatarUrl });
+
+          if (auth.currentUser) {
+            await updateCloudUserPhoto(nextAvatarUrl).catch(() => {});
+          }
+          if (getStoredToken()) {
+            void apiFetch('/api/profile/avatar', {
+              method: 'POST',
+              body: JSON.stringify({ avatar_url: nextAvatarUrl }),
+            }).catch(() => {});
+          }
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
 
-      if (targetMemberId && targetMemberId.startsWith('member_')) {
-        await updateMemberAvatarInFirestore(targetMemberId, uploaded.cloudUrl);
-      }
-
-      if (getStoredToken()) {
+      if (!nextAvatarUrl && getStoredToken()) {
         const formData = new FormData();
         formData.append('avatar', file);
-        void apiFetch('/api/profile/avatar', { method: 'POST', body: formData }).catch(() => {});
+        const res = await apiFetch<{ user: StudentProfile }>('/api/profile/avatar', {
+          method: 'POST',
+          body: formData,
+        });
+        nextAvatarUrl = res.user.avatar_url || '';
+      }
+
+      if (!nextAvatarUrl) {
+        throw new Error('Server cloud belum aktif. Masuk dengan koneksi aktif untuk mengunggah foto.');
       }
 
       const baseUser = currentUser || profileDetail?.member;
       const updatedUser: StudentProfile | null = baseUser
-        ? { ...baseUser, avatar_url: uploaded.cloudUrl }
+        ? { ...baseUser, avatar_url: nextAvatarUrl }
         : null;
 
       if (!updatedUser) {
@@ -206,7 +279,7 @@ export function MembersSection({
       }
       setProfileDetail((prev) => (prev ? { ...prev, member: updatedUser } : prev));
       onUserUpdated(updatedUser);
-      onToast('Foto profil berhasil diperbarui dan tersimpan di Firebase.', 'success');
+      onToast('Foto profil berhasil diperbarui & tersinkronisasi di semua perangkat.', 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal memperbarui foto profil.', 'error');
     } finally {
@@ -214,10 +287,71 @@ export function MembersSection({
     }
   };
 
+  const handleSaveProfileInfo = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!currentUser || !profileDetail) return;
+    setSavingProfile(true);
+    try {
+      const cleanBio = editBio.trim().slice(0, 300);
+      const nextDivision = profileDetail.member.role === 'admin' ? profileDetail.member.division : editDivision;
+      const targetMemberId = profileDetail.member.firestoreId || currentMemberDocId;
+
+      if (cloudSeeded && targetMemberId && targetMemberId.startsWith('member_')) {
+        await updateMemberProfileInFirestore(targetMemberId, {
+          bio: cleanBio,
+          ...(profileDetail.member.role !== 'admin' ? { division: nextDivision } : {}),
+        });
+      }
+
+      if (getStoredToken()) {
+        await apiFetch('/api/profile', {
+          method: 'PATCH',
+          body: JSON.stringify({
+            bio: cleanBio,
+            ...(profileDetail.member.role !== 'admin' ? { division: nextDivision } : {}),
+          }),
+        }).catch(() => {});
+      }
+
+      const updatedUser: StudentProfile = {
+        ...profileDetail.member,
+        bio: cleanBio,
+        division: nextDivision,
+      };
+      setProfileDetail((prev) => (prev ? { ...prev, member: updatedUser } : prev));
+      onUserUpdated(updatedUser);
+      setEditingProfile(false);
+      onToast('Profil berhasil diperbarui & tersimpan di server.', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal menyimpan pembaruan profil.', 'error');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
   const handleWorkFileChange = (selected: File | null) => {
     setWorkFile(selected);
     if (workPreviewUrl) URL.revokeObjectURL(workPreviewUrl);
-    setWorkPreviewUrl(selected ? URL.createObjectURL(selected) : null);
+    if (selected) {
+      setWorkPreviewUrl(URL.createObjectURL(selected));
+      setWorkSourceMode('file');
+      setWorkMediaUrl('');
+      setWorkLinkPreviewError(false);
+    } else {
+      setWorkPreviewUrl(null);
+    }
+  };
+
+  const handleWorkMediaUrlChange = (val: string) => {
+    setWorkMediaUrl(val);
+    setWorkLinkPreviewError(false);
+    if (val.trim()) {
+      setWorkSourceMode('link');
+      if (workFile) handleWorkFileChange(null);
+      if (extractGoogleDriveFileId(val)) {
+        setWorkMediaType('image');
+      }
+    }
   };
 
   const handleProfileWorkUpload = async (e: FormEvent) => {
@@ -226,80 +360,148 @@ export function MembersSection({
       onToast('Silakan masuk ke akun Anda terlebih dahulu.', 'error');
       return;
     }
-    if (!workFile || !workTitle.trim()) {
-      onToast('Judul dan file foto/video karya wajib diisi.', 'error');
+    const useLink = workSourceMode === 'link' || (!workFile && Boolean(workMediaUrl.trim()));
+    const cleanUrl = useLink ? workMediaUrl.trim() : '';
+    const activeFile = useLink ? null : workFile;
+
+    if ((!activeFile && !cleanUrl) || !workTitle.trim()) {
+      onToast('Judul dan file foto/video atau link gambar Google Drive wajib diisi.', 'error');
       return;
     }
+    if (cleanUrl && !/^https?:\/\//i.test(cleanUrl)) {
+      onToast('Tautan media harus diawali dengan https:// atau http://.', 'error');
+      return;
+    }
+
     setUploadingWork(true);
     try {
-      const uploaded = await uploadFileToCloud(workFile, {
-        isPublic: true,
-        uploaderMemberId: currentMemberDocId,
-      });
-      const mediaType: 'image' | 'video' = workFile.type.startsWith('video/') ? 'video' : 'image';
-      const fId = await createWorkInFirestore({
-        title: workTitle.trim(),
-        description: workDesc.trim(),
-        category: workCategory,
-        mediaType,
-        mediaUrl: uploaded.cloudUrl,
-        authorName: currentUser.full_name,
-        authorUsername: currentUser.username,
-        authorMemberId: currentMemberDocId,
-        authorKelas: currentUser.kelas,
-        authorDivision: currentUser.division,
-        authorAvatarColor: currentUser.avatar_color,
-        authorAvatarUrl: currentUser.avatar_url || '',
-        isAdminUploader: currentUser.role === 'admin' || isFirebaseAdmin,
-      });
-
+      const mediaType: 'image' | 'video' = activeFile
+        ? activeFile.type.startsWith('video/')
+          ? 'video'
+          : 'image'
+        : workMediaType;
+      let resolvedUrl = cleanUrl ? normalizeWorkMediaUrl(cleanUrl, mediaType) : '';
       const pendingApproval = !(currentUser.role === 'admin' || isFirebaseAdmin);
-      const createdWork: StudentWork = {
-        id: Date.now(),
-        firestoreId: fId,
-        authorUid: auth.currentUser?.uid || currentMemberDocId,
-        user_id: currentUser.id,
-        author_name: currentUser.full_name,
-        author_username: currentUser.username,
-        author_kelas: currentUser.kelas,
-        author_division: currentUser.division,
-        author_avatar_color: currentUser.avatar_color,
-        author_avatar_url: currentUser.avatar_url,
-        title: workTitle.trim(),
-        description: workDesc.trim(),
-        category: workCategory,
-        media_type: mediaType,
-        media_url: uploaded.cloudUrl,
-        shares_count: 0,
-        comments_disabled: 0,
-        approval_status: pendingApproval ? 'pending' : 'approved',
-        created_at: new Date().toISOString(),
-        likes_count: 0,
-        comments_count: 0,
-        liked_by_me: false,
-        comments: [],
-      };
+      let createdWork: StudentWork | null = null;
 
-      if (getStoredToken()) {
-        const mirrorForm = new FormData();
-        mirrorForm.append('title', workTitle.trim());
-        mirrorForm.append('category', workCategory);
-        mirrorForm.append('description', workDesc.trim());
-        mirrorForm.append('media', workFile);
-        void apiFetch('/api/works', { method: 'POST', body: mirrorForm }).catch(() => {});
+      if (cloudSeeded) {
+        try {
+          if (activeFile) {
+            const uploaded = await uploadFileToCloud(activeFile, {
+              isPublic: true,
+              uploaderMemberId: currentMemberDocId,
+            });
+            resolvedUrl = uploaded.cloudUrl;
+          }
+
+          if (resolvedUrl) {
+            const fId = await createWorkInFirestore({
+              title: workTitle.trim(),
+              description: workDesc.trim(),
+              category: workCategory,
+              mediaType,
+              mediaUrl: resolvedUrl,
+              authorName: currentUser.full_name,
+              authorUsername: currentUser.username,
+              authorMemberId: currentMemberDocId,
+              authorKelas: currentUser.kelas,
+              authorDivision: currentUser.division,
+              authorAvatarColor: currentUser.avatar_color,
+              authorAvatarUrl: currentUser.avatar_url || '',
+              isAdminUploader: !pendingApproval,
+            });
+
+            createdWork = {
+              id: Date.now(),
+              firestoreId: fId,
+              authorUid: currentMemberDocId || auth.currentUser?.uid,
+              user_id: currentUser.id,
+              author_name: currentUser.full_name,
+              author_username: currentUser.username,
+              author_kelas: currentUser.kelas,
+              author_division: currentUser.division,
+              author_avatar_color: currentUser.avatar_color,
+              author_avatar_url: currentUser.avatar_url,
+              title: workTitle.trim(),
+              description: workDesc.trim(),
+              category: workCategory,
+              media_type: mediaType,
+              media_url: resolvedUrl,
+              shares_count: 0,
+              comments_disabled: 0,
+              approval_status: pendingApproval ? 'pending' : 'approved',
+              created_at: new Date().toISOString(),
+              likes_count: 0,
+              comments_count: 0,
+              liked_by_me: false,
+              comments: [],
+            };
+
+            if (getStoredToken()) {
+              void apiFetch('/api/works', {
+                method: 'POST',
+                body: JSON.stringify({
+                  title: workTitle.trim(),
+                  category: workCategory,
+                  description: workDesc.trim(),
+                  media_url: resolvedUrl,
+                  media_type: mediaType,
+                }),
+              }).catch(() => {});
+            }
+          }
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
 
-      setProfileDetail((prev) => (prev ? { ...prev, works: [createdWork, ...prev.works] } : prev));
+      if (!createdWork && getStoredToken()) {
+        if (activeFile) {
+          const formData = new FormData();
+          formData.append('title', workTitle.trim());
+          formData.append('category', workCategory);
+          formData.append('description', workDesc.trim());
+          formData.append('media', activeFile);
+          const res = await apiFetch<{ work: StudentWork }>('/api/works', {
+            method: 'POST',
+            body: formData,
+          });
+          createdWork = res.work;
+        } else if (resolvedUrl) {
+          const res = await apiFetch<{ work: StudentWork }>('/api/works', {
+            method: 'POST',
+            body: JSON.stringify({
+              title: workTitle.trim(),
+              category: workCategory,
+              description: workDesc.trim(),
+              media_url: resolvedUrl,
+              media_type: mediaType,
+            }),
+          });
+          createdWork = res.work;
+        }
+      }
+
+      if (!createdWork) {
+        throw new Error('Gagal mengunggah karya ke server.');
+      }
+
+      setProfileDetail((prev) => (prev ? { ...prev, works: [createdWork!, ...prev.works] } : prev));
       if (!pendingApproval) {
         onWorkApprovedOrAdminCreated(createdWork);
+      } else {
+        onWorkPendingCreated?.(createdWork);
       }
       setShowWorkModal(false);
       setWorkTitle('');
       setWorkDesc('');
+      setWorkMediaUrl('');
+      setWorkLinkPreviewError(false);
+      setWorkSourceMode('file');
       handleWorkFileChange(null);
       onToast(
         pendingApproval
-          ? 'Karya berhasil dikirim ke Firebase! Menunggu peninjauan Admin sebelum terposting di Beranda.'
+          ? 'Karya berhasil dikirim ke server & tersinkronisasi! Menunggu peninjauan Admin sebelum terposting di Beranda.'
           : 'Karya berhasil diterbitkan ke Beranda dan Galeri.',
         'success'
       );
@@ -421,18 +623,82 @@ export function MembersSection({
               </div>
 
               {isOwnProfile && (
-                <button
-                  type="button"
-                  onClick={() => setShowWorkModal(true)}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-xl transition-colors min-h-[44px] whitespace-nowrap shrink-0"
-                >
-                  <Plus className="w-4 h-4" />
-                  Unggah Karya
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditBio(member.bio || '');
+                      setEditDivision(
+                        EDITABLE_DIVISIONS.includes(member.division) ? member.division : 'Fotografi'
+                      );
+                      setEditingProfile((v) => !v);
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors min-h-[44px] whitespace-nowrap"
+                  >
+                    <PenLine className="w-4 h-4" />
+                    Edit Profil
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowWorkModal(true)}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] rounded-xl transition-colors min-h-[44px] whitespace-nowrap"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Unggah Karya
+                  </button>
+                </div>
               )}
             </div>
 
-            <p className="text-sm sm:text-[15px] text-slate-600 leading-relaxed">{member.bio}</p>
+            {isOwnProfile && editingProfile ? (
+              <form onSubmit={handleSaveProfileInfo} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                {member.role !== 'admin' && (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">Divisi Fokus</label>
+                    <select
+                      value={editDivision}
+                      onChange={(e) => setEditDivision(e.target.value)}
+                      className="w-full sm:w-64 px-3 py-2 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                    >
+                      {EDITABLE_DIVISIONS.map((d) => (
+                        <option key={d} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Bio / Minat Media Siswa</label>
+                  <textarea
+                    rows={3}
+                    maxLength={300}
+                    value={editBio}
+                    onChange={(e) => setEditBio(e.target.value)}
+                    placeholder="Ceritakan minat Anda di fotografi, videografi, penyiaran, atau jurnalistik..."
+                    className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                  />
+                </div>
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingProfile(false)}
+                    className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-xl"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingProfile}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] disabled:opacity-60 rounded-xl"
+                  >
+                    {savingProfile ? 'Menyimpan...' : 'Simpan Profil'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="text-sm sm:text-[15px] text-slate-600 leading-relaxed">{member.bio}</p>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-slate-100">
               <div className="p-4 bg-slate-50 rounded-xl border border-slate-200/70">
@@ -522,7 +788,8 @@ export function MembersSection({
                     <thead>
                       <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
                         <th className="py-3 pr-4">Tanggal</th>
-                        <th className="py-3 px-4">Waktu Masuk</th>
+                        <th className="py-3 px-4">Jam Masuk</th>
+                        <th className="py-3 px-4">Jam Pulang</th>
                         <th className="py-3 px-4">Kegiatan</th>
                         <th className="py-3 px-4">Metode</th>
                         <th className="py-3 pl-4 text-right">Status</th>
@@ -530,19 +797,31 @@ export function MembersSection({
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-sm">
                       {attendanceHistory.map((row) => (
-                        <tr key={row.id} className="hover:bg-slate-50/70">
+                        <tr key={`${row.id}-${row.attendance_date}`} className="hover:bg-slate-50/70">
                           <td className="py-3 pr-4 whitespace-nowrap text-slate-700 font-medium">
                             <span className="inline-flex items-center gap-1.5">
                               <Calendar className="w-3.5 h-3.5 text-slate-400" />
                               {formatDateID(row.attendance_date)}
                             </span>
                           </td>
-                          <td className="py-3 px-4 whitespace-nowrap font-mono text-xs text-slate-600 tabular-nums">
+                          <td className="py-3 px-4 whitespace-nowrap font-mono text-xs text-slate-700 tabular-nums">
                             {row.check_in_time} {getLocalTimeZoneLabel()}
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap font-mono text-xs tabular-nums">
+                            {row.check_out_time ? (
+                              <span className="text-indigo-700 font-medium">
+                                {row.check_out_time} {getLocalTimeZoneLabel()}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
                           </td>
                           <td className="py-3 px-4 text-slate-800">{row.session_title}</td>
                           <td className="py-3 px-4 whitespace-nowrap text-xs font-mono text-slate-600">
-                            {row.method}
+                            <span>{row.method}</span>
+                            {row.check_out_method && row.check_out_method !== row.method && (
+                              <span className="text-slate-400"> / {row.check_out_method}</span>
+                            )}
                           </td>
                           <td className="py-3 pl-4 whitespace-nowrap text-right font-medium">
                             <span
@@ -781,32 +1060,136 @@ export function MembersSection({
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                    Pilih File Foto atau Video (maks 15MB)
-                  </label>
-                  <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-5 cursor-pointer hover:bg-slate-50 transition-colors">
-                    <div className="flex items-center gap-3 text-slate-500">
-                      <ImageIcon className="w-5 h-5" />
-                      <Film className="w-5 h-5" />
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="block text-xs font-medium text-slate-700">
+                      Sumber Media Karya
+                    </label>
+                    <div className="inline-flex items-center p-1 bg-slate-100 rounded-xl">
+                      <button
+                        type="button"
+                        onClick={() => setWorkSourceMode('file')}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                          workSourceMode === 'file'
+                            ? 'bg-white text-slate-900 shadow-sm'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        <ImageIcon className="w-3.5 h-3.5" />
+                        Upload File
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWorkSourceMode('link')}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                          workSourceMode === 'link'
+                            ? 'bg-white text-slate-900 shadow-sm'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        <Link2 className="w-3.5 h-3.5" />
+                        Link Google Drive / URL
+                      </button>
                     </div>
-                    <span className="text-xs font-medium text-slate-700 text-center">
-                      {workFile ? workFile.name : 'Klik untuk memilih foto atau video'}
-                    </span>
-                    <input
-                      type="file"
-                      accept="image/*,video/*"
-                      className="hidden"
-                      onChange={(e) => handleWorkFileChange(e.target.files?.[0] || null)}
-                    />
-                  </label>
+                  </div>
 
-                  {workPreviewUrl && workFile && (
-                    <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-48">
-                      {workFile.type.startsWith('video/') ? (
-                        <video src={workPreviewUrl} controls className="w-full max-h-48 object-contain" />
+                  {workSourceMode === 'file' ? (
+                    <>
+                      <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-5 cursor-pointer hover:bg-slate-50 transition-colors">
+                        <div className="flex items-center gap-3 text-slate-500">
+                          <ImageIcon className="w-5 h-5" />
+                          <Film className="w-5 h-5" />
+                        </div>
+                        <span className="text-xs font-medium text-slate-700 text-center">
+                          {workFile ? workFile.name : 'Klik untuk memilih foto atau video (maks 15MB)'}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*,video/*"
+                          className="hidden"
+                          onChange={(e) => handleWorkFileChange(e.target.files?.[0] || null)}
+                        />
+                      </label>
+
+                      {workPreviewUrl && workFile && (
+                        <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-48">
+                          {workFile.type.startsWith('video/') ? (
+                            <video src={workPreviewUrl} controls className="w-full max-h-48 object-contain" />
+                          ) : (
+                            <img src={workPreviewUrl} alt="Pratinjau karya" className="w-full max-h-48 object-cover" />
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="space-y-3 bg-slate-50 border border-slate-200 rounded-xl p-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                        <div className="sm:col-span-8">
+                          <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                            Tautan Gambar Google Drive atau URL Media (HTTPS)
+                          </label>
+                          <input
+                            type="url"
+                            value={workMediaUrl}
+                            onChange={(e) => handleWorkMediaUrlChange(e.target.value)}
+                            placeholder="https://drive.google.com/file/d/.../view?usp=sharing"
+                            className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                          />
+                        </div>
+                        <div className="sm:col-span-4">
+                          <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                            Jenis Media
+                          </label>
+                          <select
+                            value={workMediaType}
+                            onChange={(e) => setWorkMediaType(e.target.value as 'image' | 'video')}
+                            className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                          >
+                            <option value="image">Foto / Gambar</option>
+                            <option value="video">Video</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {extractGoogleDriveFileId(workMediaUrl) ? (
+                        <p className="flex items-start gap-1.5 text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                          <span>
+                            Link Google Drive terdeteksi. Pastikan izin file di Google Drive diatur ke <strong>Siapa saja yang memiliki link (Viewer)</strong> agar foto muncul otomatis.
+                          </span>
+                        </p>
                       ) : (
-                        <img src={workPreviewUrl} alt="Pratinjau karya" className="w-full max-h-48 object-cover" />
+                        <p className="text-[11px] text-slate-500">
+                          Tempel link berbagi gambar dari Google Drive atau URL gambar HTTPS langsung.
+                        </p>
+                      )}
+
+                      {workMediaUrl.trim() && /^https?:\/\//i.test(workMediaUrl.trim()) && (
+                        <div className="space-y-1.5">
+                          <p className="text-[11px] font-medium text-slate-600">Pratinjau Otomatis:</p>
+                          <div className="rounded-xl overflow-hidden border border-slate-200 bg-white max-h-48 flex items-center justify-center">
+                            {workMediaType === 'video' ? (
+                              <CloudVideo
+                                src={normalizeWorkMediaUrl(workMediaUrl, 'video')}
+                                controls
+                                className="w-full max-h-48 object-contain"
+                              />
+                            ) : (
+                              <CloudImage
+                                src={normalizeWorkMediaUrl(workMediaUrl, 'image')}
+                                alt="Pratinjau tautan gambar"
+                                className="w-full max-h-48 object-cover"
+                                onImageLoadSuccess={() => setWorkLinkPreviewError(false)}
+                                onImageLoadFailed={() => setWorkLinkPreviewError(true)}
+                              />
+                            )}
+                          </div>
+                          {workLinkPreviewError && (
+                            <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                              Gambar belum dapat dimuat di pratinjau. Pastikan akses link di Google Drive diatur ke <strong>Siapa saja yang memiliki link</strong>.
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}

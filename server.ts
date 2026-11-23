@@ -141,6 +141,7 @@ interface AuthUser {
   bio: string;
   nfc_uid: string;
   qr_code_token: string;
+  parent_whatsapp?: string;
   avatar_color: string;
   avatar_url?: string;
   created_at: string;
@@ -156,7 +157,7 @@ function getUserFromRequest(req: Request): AuthUser | undefined {
   const token = authHeader.slice(7).trim();
   if (!token) return undefined;
   const row = db.prepare(`
-    SELECT u.id, u.username, u.role, u.full_name, u.nis, u.kelas, u.division, u.bio, u.nfc_uid, u.qr_code_token, u.avatar_color, u.avatar_url, u.created_at
+    SELECT u.id, u.username, u.role, u.full_name, u.nis, u.kelas, u.division, u.bio, u.nfc_uid, u.qr_code_token, u.parent_whatsapp, u.avatar_color, u.avatar_url, u.created_at
     FROM sessions s
     JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ?
@@ -364,6 +365,122 @@ function getClientNowParts(req: Request) {
   return formatWithIana('Asia/Jakarta');
 }
 
+function normalizeWhatsappServer(raw?: string | null): string {
+  if (!raw) return '';
+  let digits = String(raw).replace(/[^\d]/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('0')) digits = `62${digits.slice(1)}`;
+  else if (digits.startsWith('8')) digits = `62${digits}`;
+  if (digits.length < 9 || digits.length > 15) return '';
+  return digits;
+}
+
+function buildAttendanceWaTextServer(params: {
+  studentName: string;
+  kelas: string;
+  division: string;
+  actionType: 'check_in' | 'check_out';
+  status: string;
+  attendanceDate: string;
+  checkInTime: string;
+  checkOutTime?: string;
+  tzLabel: string;
+  method: string;
+  sessionTitle: string;
+  recordedBy: string;
+}): string {
+  if (params.actionType === 'check_out') {
+    return [
+      '*LAPORAN ABSENSI PULANG · NMC SMPN 2 CIAMIS*',
+      '',
+      `Assalamu'alaikum Wr. Wb.`,
+      `Yth. Bapak/Ibu Orang Tua/Wali dari *${params.studentName}* (Kelas ${params.kelas} · Divisi ${params.division}).`,
+      '',
+      'Kami informasikan bahwa ananda telah selesai mengikuti kegiatan ekstrakurikuler Nedacis Media Center (NMC) dan telah melakukan *ABSEN PULANG*:',
+      `- Tanggal: ${params.attendanceDate}`,
+      `- Jam Masuk: ${params.checkInTime} ${params.tzLabel}`,
+      `- Jam Pulang: *${params.checkOutTime || params.checkInTime} ${params.tzLabel}*`,
+      `- Status Kehadiran: ${params.status}`,
+      `- Kegiatan: ${params.sessionTitle}`,
+      `- Metode Absen Pulang: ${params.method}`,
+      `- Pencatat: ${params.recordedBy}`,
+      '',
+      'Mohon pendampingan kepulangan ananda menuju rumah. Terima kasih.',
+    ].join('\n');
+  }
+  return [
+    '*LAPORAN ABSENSI MASUK · NMC SMPN 2 CIAMIS*',
+    '',
+    `Assalamu'alaikum Wr. Wb.`,
+    `Yth. Bapak/Ibu Orang Tua/Wali dari *${params.studentName}* (Kelas ${params.kelas} · Divisi ${params.division}).`,
+    '',
+    'Kami informasikan bahwa ananda telah tiba dan melakukan *ABSEN MASUK* kegiatan ekstrakurikuler Nedacis Media Center (NMC):',
+    `- Tanggal: ${params.attendanceDate}`,
+    `- Jam Masuk: *${params.checkInTime} ${params.tzLabel}*`,
+    `- Status Kehadiran: *${params.status}*`,
+    `- Kegiatan: ${params.sessionTitle}`,
+    `- Metode Absen Masuk: ${params.method}`,
+    `- Pencatat: ${params.recordedBy}`,
+    '',
+    'Terima kasih atas dukungan Bapak/Ibu.',
+  ].join('\n');
+}
+
+async function dispatchWhatsappGateway(
+  rawPhone: string,
+  message: string
+): Promise<{ gatewayConfigured: boolean; sent: boolean; normalizedPhone: string; error?: string }> {
+  const normalizedPhone = normalizeWhatsappServer(rawPhone);
+  const gatewayUrl = (process.env.WHATSAPP_API_URL || '').trim();
+  const gatewayToken = (process.env.WHATSAPP_API_TOKEN || '').trim();
+  if (!gatewayUrl) {
+    return { gatewayConfigured: false, sent: false, normalizedPhone };
+  }
+  if (!normalizedPhone) {
+    return { gatewayConfigured: true, sent: false, normalizedPhone: '', error: 'Nomor WhatsApp orang tua belum diisi atau tidak valid.' };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (gatewayToken) {
+      headers.Authorization = gatewayToken;
+    }
+    const resp = await fetch(gatewayUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        target: normalizedPhone,
+        phone: normalizedPhone,
+        to: normalizedPhone,
+        message,
+        text: message,
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      return {
+        gatewayConfigured: true,
+        sent: false,
+        normalizedPhone,
+        error: `Gateway HTTP ${resp.status}${txt ? `: ${txt.slice(0, 120)}` : ''}`,
+      };
+    }
+    return { gatewayConfigured: true, sent: true, normalizedPhone };
+  } catch (err) {
+    return {
+      gatewayConfigured: true,
+      sent: false,
+      normalizedPhone,
+      error: err instanceof Error ? err.message : 'Gagal menghubungi gateway WhatsApp.',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const DEFAULT_SOCIAL_LINKS = [
   { id: 'ig', platform: 'instagram', label: 'Instagram', url: 'https://instagram.com' },
   { id: 'tt', platform: 'tiktok', label: 'TikTok', url: 'https://tiktok.com' },
@@ -457,10 +574,13 @@ app.get('/api/bootstrap', (req, res) => {
   const user = getUserFromRequest(req);
   const news = db.prepare('SELECT * FROM news_articles ORDER BY published_at DESC, id DESC').all();
   const schedules = db.prepare('SELECT * FROM schedules ORDER BY event_date ASC, start_time ASC').all();
+  const isAdminViewer = user?.role === 'admin';
   const members = db.prepare(`
     SELECT
       u.id, u.username, u.role, u.full_name, u.nis, u.kelas, u.division, u.bio,
-      u.nfc_uid, u.qr_code_token, u.avatar_color, u.avatar_url, u.show_in_members, u.created_at,
+      u.nfc_uid, u.qr_code_token,
+      ${isAdminViewer ? 'u.parent_whatsapp,' : "'' as parent_whatsapp,"}
+      u.avatar_color, u.avatar_url, u.show_in_members, u.created_at,
       (SELECT COUNT(*) FROM attendance_records ar WHERE ar.user_id = u.id AND ar.status IN ('Hadir', 'Terlambat')) as attendance_count,
       (SELECT COUNT(*) FROM works w WHERE w.user_id = u.id AND w.approval_status = 'approved') as works_count,
       COALESCE((SELECT SUM(lts.points_awarded) FROM lms_task_submissions lts WHERE lts.user_id = u.id), 0) as lms_points
@@ -473,7 +593,7 @@ app.get('/api/bootstrap', (req, res) => {
   const attendanceToday =
     user?.role === 'admin'
       ? db.prepare(`
-          SELECT ar.*, u.full_name, u.username, u.nis, u.kelas, u.division, u.nfc_uid
+          SELECT ar.*, u.full_name, u.username, u.nis, u.kelas, u.division, u.nfc_uid, u.parent_whatsapp
           FROM attendance_records ar
           JOIN users u ON u.id = ar.user_id
           ORDER BY ar.attendance_date DESC, ar.check_in_time DESC
@@ -594,7 +714,7 @@ app.post('/api/profile/avatar', requireAuth, upload.single('avatar'), (req: Auth
 // ==================== ADMIN STUDENT MANAGEMENT (20 REGISTERED SEATS) ====================
 
 app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
-  const { username, password, full_name, nis, kelas, division, nfc_uid, bio } = req.body as {
+  const { username, password, full_name, nis, kelas, division, nfc_uid, parent_whatsapp, bio } = req.body as {
     username?: string;
     password?: string;
     full_name?: string;
@@ -602,6 +722,7 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
     kelas?: string;
     division?: string;
     nfc_uid?: string;
+    parent_whatsapp?: string;
     bio?: string;
   };
 
@@ -625,14 +746,15 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
 
   const generatedNfc = (nfc_uid && nfc_uid.trim().toUpperCase()) || `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
   const generatedQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const cleanParentWa = normalizeWhatsappServer(parent_whatsapp) || (parent_whatsapp || '').trim().slice(0, 30);
   const colors = ['#1D4ED8', '#0F766E', '#B45309', '#BE123C', '#4338CA', '#0369A1'];
   const avatarColor = colors[studentCount % colors.length];
   const now = new Date().toISOString();
 
   try {
     const info = db.prepare(`
-      INSERT INTO users (username, password_hash, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, created_at)
-      VALUES (?, ?, 'student', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (username, password_hash, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, created_at)
+      VALUES (?, ?, 'student', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       cleanUsername,
       hashPassword(password?.trim() || 'siswa123'),
@@ -643,18 +765,233 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
       bio?.trim() || `Anggota aktif Divisi ${division} NMC SMPN 2 Ciamis.`,
       generatedNfc,
       generatedQr,
+      cleanParentWa,
       avatarColor,
       now
     );
 
     const created = db.prepare(`
-      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, created_at
+      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, created_at
       FROM users WHERE id = ?
     `).get(info.lastInsertRowid);
     checkpointDatabase('PASSIVE');
     res.status(201).json({ student: created });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal membuat akun siswa.' });
+  }
+});
+
+app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) => {
+  const { students, overwrite } = req.body as {
+    students?: Array<{
+      username?: string;
+      role?: string;
+      full_name?: string;
+      nis?: string;
+      kelas?: string;
+      division?: string;
+      bio?: string;
+      nfc_uid?: string;
+      qr_code_token?: string;
+      parent_whatsapp?: string;
+      avatar_color?: string;
+      show_in_members?: boolean | number;
+      password?: string;
+    }>;
+    overwrite?: boolean;
+  };
+
+  if (!Array.isArray(students) || students.length === 0) {
+    res.status(400).json({ error: 'Daftar data anggota untuk diimport kosong.' });
+    return;
+  }
+
+  const allowOverwrite = Boolean(overwrite);
+  const colors = ['#1D4ED8', '#0F766E', '#B45309', '#BE123C', '#4338CA', '#0369A1'];
+  const now = new Date().toISOString();
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  try {
+    db.transaction(() => {
+      students.forEach((raw, idx) => {
+        const cleanUsername = String(raw.username || '')
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9._-]/g, '');
+
+        if (!cleanUsername || cleanUsername.length < 2) {
+          errors.push(`Baris ${idx + 1}: username "${raw.username || ''}" tidak valid.`);
+          return;
+        }
+
+        const existing = db
+          .prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)')
+          .get(cleanUsername) as (AuthUser & { show_in_members?: number }) | undefined;
+
+        if (existing && !allowOverwrite) {
+          skipped++;
+          return;
+        }
+
+        const role: 'admin' | 'student' =
+          raw.role === 'admin' || raw.role === 'student'
+            ? raw.role
+            : existing?.role || 'student';
+
+        const fullName = String(raw.full_name || existing?.full_name || '').trim().slice(0, 120);
+        if (!fullName) {
+          errors.push(`Baris ${idx + 1} (${cleanUsername}): nama lengkap wajib diisi.`);
+          return;
+        }
+
+        const division = String(raw.division || existing?.division || 'Fotografi').trim().slice(0, 40) || 'Fotografi';
+        const kelas =
+          String(raw.kelas || existing?.kelas || (role === 'admin' ? 'Pembina' : '8A')).trim().slice(0, 30) || '8A';
+        const nis = String(raw.nis || existing?.nis || cleanUsername).trim().slice(0, 40) || cleanUsername;
+        const bio =
+          raw.bio !== undefined && String(raw.bio).trim() !== ''
+            ? String(raw.bio).trim().slice(0, 400)
+            : existing?.bio || `Anggota aktif Divisi ${division} NMC SMPN 2 Ciamis.`;
+        const avatarColor =
+          raw.avatar_color && /^#[0-9A-Fa-f]{6}$/.test(raw.avatar_color.trim())
+            ? raw.avatar_color.trim().toUpperCase()
+            : existing?.avatar_color || colors[(created + updated + idx) % colors.length];
+        const showInMembers =
+          raw.show_in_members !== undefined
+            ? raw.show_in_members === true || raw.show_in_members === 1
+              ? 1
+              : 0
+            : existing?.show_in_members ?? 1;
+
+        const nextParentWa =
+          raw.parent_whatsapp !== undefined && String(raw.parent_whatsapp).trim() !== ''
+            ? normalizeWhatsappServer(raw.parent_whatsapp) || String(raw.parent_whatsapp).trim().slice(0, 30)
+            : existing?.parent_whatsapp || '';
+
+        if (existing) {
+          const nextNfc = String(raw.nfc_uid || existing.nfc_uid || '').trim().toUpperCase();
+          const nextQr = String(raw.qr_code_token || existing.qr_code_token || '').trim().toUpperCase();
+
+          if (nextNfc) {
+            const dupNfc = db
+              .prepare('SELECT username FROM users WHERE UPPER(nfc_uid) = UPPER(?) AND id != ?')
+              .get(nextNfc, existing.id) as { username: string } | undefined;
+            if (dupNfc) {
+              errors.push(`Baris ${idx + 1} (${cleanUsername}): UID NFC ${nextNfc} sudah digunakan ${dupNfc.username}.`);
+              return;
+            }
+          }
+
+          if (nextQr) {
+            const dupQr = db
+              .prepare('SELECT username FROM users WHERE UPPER(qr_code_token) = UPPER(?) AND id != ?')
+              .get(nextQr, existing.id) as { username: string } | undefined;
+            if (dupQr) {
+              errors.push(`Baris ${idx + 1} (${cleanUsername}): Token QR ${nextQr} sudah digunakan ${dupQr.username}.`);
+              return;
+            }
+          }
+
+          db.prepare(`
+            UPDATE users
+            SET role = ?, full_name = ?, nis = ?, kelas = ?, division = ?, bio = ?,
+                nfc_uid = ?, qr_code_token = ?, parent_whatsapp = ?, avatar_color = ?, show_in_members = ?
+            WHERE id = ?
+          `).run(
+            role,
+            fullName,
+            nis,
+            kelas,
+            division,
+            bio,
+            nextNfc || existing.nfc_uid,
+            nextQr || existing.qr_code_token,
+            nextParentWa,
+            avatarColor,
+            showInMembers,
+            existing.id
+          );
+
+          if (raw.password && raw.password.trim().length >= 4) {
+            db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
+              hashPassword(raw.password.trim()),
+              existing.id
+            );
+          }
+
+          updated++;
+        } else {
+          let nextNfc =
+            String(raw.nfc_uid || '').trim().toUpperCase() ||
+            `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+          const dupNfc = db.prepare('SELECT username FROM users WHERE UPPER(nfc_uid) = UPPER(?)').get(nextNfc) as
+            | { username: string }
+            | undefined;
+          if (dupNfc) {
+            if (raw.nfc_uid && raw.nfc_uid.trim()) {
+              errors.push(`Baris ${idx + 1} (${cleanUsername}): UID NFC ${nextNfc} sudah digunakan ${dupNfc.username}.`);
+              return;
+            }
+            nextNfc = `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+          }
+
+          let nextQr =
+            String(raw.qr_code_token || '').trim().toUpperCase() ||
+            `NMC-${cleanUsername.toUpperCase().slice(0, 8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+          const dupQr = db.prepare('SELECT username FROM users WHERE UPPER(qr_code_token) = UPPER(?)').get(nextQr) as
+            | { username: string }
+            | undefined;
+          if (dupQr) {
+            if (raw.qr_code_token && raw.qr_code_token.trim()) {
+              errors.push(`Baris ${idx + 1} (${cleanUsername}): Token QR ${nextQr} sudah digunakan ${dupQr.username}.`);
+              return;
+            }
+            nextQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+          }
+
+          const rawPass =
+            raw.password && raw.password.trim().length >= 4
+              ? raw.password.trim()
+              : role === 'admin'
+              ? 'pembina123'
+              : 'siswa123';
+
+          db.prepare(`
+            INSERT INTO users (
+              username, password_hash, role, full_name, nis, kelas, division, bio,
+              nfc_uid, qr_code_token, parent_whatsapp, avatar_color, show_in_members, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            cleanUsername,
+            hashPassword(rawPass),
+            role,
+            fullName,
+            nis,
+            kelas,
+            division,
+            bio,
+            nextNfc,
+            nextQr,
+            nextParentWa,
+            avatarColor,
+            showInMembers,
+            now
+          );
+
+          created++;
+        }
+      });
+    })();
+
+    checkpointDatabase('PASSIVE');
+    res.json({ ok: true, created, updated, skipped, errors });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal mengimport data anggota.' });
   }
 });
 
@@ -669,6 +1006,7 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     bio,
     nfc_uid,
     qr_code_token,
+    parent_whatsapp,
     avatar_color,
     password,
   } = req.body as {
@@ -680,6 +1018,7 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     bio?: string;
     nfc_uid?: string;
     qr_code_token?: string;
+    parent_whatsapp?: string;
     avatar_color?: string;
     password?: string;
   };
@@ -735,6 +1074,10 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
       if (cleanQr !== null) {
         db.prepare('UPDATE users SET qr_code_token = ? WHERE id = ?').run(cleanQr, id);
       }
+      if (parent_whatsapp !== undefined) {
+        const normalizedWa = normalizeWhatsappServer(parent_whatsapp) || parent_whatsapp.trim().slice(0, 30);
+        db.prepare('UPDATE users SET parent_whatsapp = ? WHERE id = ?').run(normalizedWa, id);
+      }
       if (full_name !== undefined && full_name.trim()) {
         db.prepare('UPDATE users SET full_name = ? WHERE id = ?').run(full_name.trim(), id);
       }
@@ -761,7 +1104,7 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     checkpointDatabase('PASSIVE');
 
     const updated = db.prepare(`
-      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, avatar_url, created_at
+      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, created_at
       FROM users WHERE id = ?
     `).get(id) as AuthUser;
     res.json({ student: { ...updated, lms_points: getUserTotalLmsPoints(id) } });
@@ -781,11 +1124,17 @@ app.delete('/api/admin/students/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ==================== ATTENDANCE (NFC/RFID USB READER & QR CODE) ====================
+// ==================== ATTENDANCE (NFC/RFID USB READER & QR CODE + MASUK/PULANG + WA) ====================
+
+app.get('/api/whatsapp/status', requireAdmin, (_req, res) => {
+  res.json({
+    gatewayConfigured: Boolean((process.env.WHATSAPP_API_URL || '').trim()),
+  });
+});
 
 app.get('/api/attendance', requireAdmin, (_req, res) => {
   const rows = db.prepare(`
-    SELECT ar.*, u.full_name, u.username, u.nis, u.kelas, u.division, u.nfc_uid
+    SELECT ar.*, u.full_name, u.username, u.nis, u.kelas, u.division, u.nfc_uid, u.parent_whatsapp
     FROM attendance_records ar
     JOIN users u ON u.id = ar.user_id
     ORDER BY ar.attendance_date DESC, ar.check_in_time DESC
@@ -794,13 +1143,15 @@ app.get('/api/attendance', requireAdmin, (_req, res) => {
   res.json({ records: rows });
 });
 
-app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
+app.post('/api/attendance/scan', requireAdmin, async (req: AuthedRequest, res) => {
   const currentUser = req.user;
-  const { code, method, session_title, status } = req.body as {
+  const { code, method, session_title, status, attendance_type, auto_send_wa } = req.body as {
     code?: string;
     method?: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
     session_title?: string;
     status?: 'Hadir' | 'Terlambat' | 'Izin';
+    attendance_type?: 'auto' | 'check_in' | 'check_out';
+    auto_send_wa?: boolean;
   };
 
   if (!code || !code.trim()) {
@@ -809,7 +1160,6 @@ app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
   }
 
   let cleanCode = code.trim();
-  // Support scanning a full profile URL encoded in QR code (e.g., https://.../profil/ahmad.fauzan or #profil/ahmad.fauzan)
   const urlMatch = cleanCode.match(/profil\/([a-zA-Z0-9._-]+)$/i);
   if (urlMatch) {
     cleanCode = urlMatch[1];
@@ -833,59 +1183,119 @@ app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
   `).get(cleanCode, cleanCode, swappedCode, cleanCode, cleanCode) as AuthUser | undefined;
 
   if (!student) {
-    res.status(404).json({ error: `Kartu / QR "${cleanCode}" tidak terdaftar pada 20 anggota NMC SMPN 2 Ciamis.` });
+    res.status(404).json({ error: `Kartu / QR "${cleanCode}" tidak terdaftar pada anggota NMC SMPN 2 Ciamis.` });
     return;
   }
 
   const clientNow = getClientNowParts(req);
   const attendanceDate = clientNow.dateStr;
-  const checkInTime = clientNow.timeStr;
+  const scanTime = clientNow.timeStr;
 
   const scanMethod: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' =
     method === 'QR Scan' || method === 'Manual Admin' ? method : 'NFC/RFID';
 
-  // Determine status (after 15:15 considered Terlambat unless explicitly set by admin)
   let resolvedStatus: 'Hadir' | 'Terlambat' | 'Izin' = 'Hadir';
   if (status && ['Hadir', 'Terlambat', 'Izin'].includes(status)) {
     resolvedStatus = status;
-  } else if (clientNow.hour > 15 || (clientNow.hour === 15 && clientNow.minute > 15)) {
-    resolvedStatus = 'Hadir'; // keep Hadir default for live demo friendliness unless late toggle used, or let's mark based on schedule
   }
 
   const resolvedSession = session_title?.trim() || 'Pertemuan Rutin Nedacis Media Center';
   const recordedBy = currentUser ? currentUser.full_name : 'Terminal USB Reader Studio NMC';
+  const mode = attendance_type === 'check_in' || attendance_type === 'check_out' ? attendance_type : 'auto';
 
   const existingToday = db.prepare(`
-    SELECT id FROM attendance_records WHERE user_id = ? AND attendance_date = ?
-  `).get(student.id, attendanceDate) as { id: number } | undefined;
+    SELECT id, check_in_time, check_out_time, method, status, session_title
+    FROM attendance_records WHERE user_id = ? AND attendance_date = ?
+  `).get(student.id, attendanceDate) as
+    | { id: number; check_in_time: string; check_out_time: string; method: string; status: string; session_title: string }
+    | undefined;
+
+  let actionType: 'check_in' | 'check_out' = 'check_in';
 
   if (existingToday) {
-    db.prepare(`
-      UPDATE attendance_records
-      SET check_in_time = ?, method = ?, status = ?, session_title = ?, recorded_by = ?
-      WHERE id = ?
-    `).run(checkInTime, scanMethod, resolvedStatus, resolvedSession, recordedBy, existingToday.id);
+    if (mode === 'check_in') {
+      actionType = 'check_in';
+      db.prepare(`
+        UPDATE attendance_records
+        SET check_in_time = ?, method = ?, status = ?, session_title = ?, recorded_by = ?
+        WHERE id = ?
+      `).run(scanTime, scanMethod, resolvedStatus, resolvedSession, recordedBy, existingToday.id);
+    } else {
+      actionType = 'check_out';
+      db.prepare(`
+        UPDATE attendance_records
+        SET check_out_time = ?, check_out_method = ?, recorded_by = ?
+        WHERE id = ?
+      `).run(scanTime, scanMethod, recordedBy, existingToday.id);
+    }
   } else {
-    db.prepare(`
-      INSERT INTO attendance_records (user_id, attendance_date, check_in_time, method, status, session_title, recorded_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(student.id, attendanceDate, checkInTime, scanMethod, resolvedStatus, resolvedSession, recordedBy, clientNow.now.toISOString());
+    if (mode === 'check_out') {
+      actionType = 'check_out';
+      db.prepare(`
+        INSERT INTO attendance_records (user_id, attendance_date, check_in_time, check_out_time, method, check_out_method, status, session_title, recorded_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(student.id, attendanceDate, scanTime, scanTime, scanMethod, scanMethod, resolvedStatus, resolvedSession, recordedBy, clientNow.now.toISOString());
+    } else {
+      actionType = 'check_in';
+      db.prepare(`
+        INSERT INTO attendance_records (user_id, attendance_date, check_in_time, check_out_time, method, check_out_method, status, session_title, recorded_by, created_at)
+        VALUES (?, ?, ?, '', ?, '', ?, ?, ?, ?)
+      `).run(student.id, attendanceDate, scanTime, scanMethod, resolvedStatus, resolvedSession, recordedBy, clientNow.now.toISOString());
+    }
   }
 
-  const record = db.prepare(`
-    SELECT ar.*, u.full_name, u.username, u.nis, u.kelas, u.division, u.nfc_uid
+  let record = db.prepare(`
+    SELECT ar.*, u.full_name, u.username, u.nis, u.kelas, u.division, u.nfc_uid, u.parent_whatsapp
     FROM attendance_records ar
     JOIN users u ON u.id = ar.user_id
     WHERE ar.user_id = ? AND ar.attendance_date = ?
-  `).get(student.id, attendanceDate);
+  `).get(student.id, attendanceDate) as Record<string, unknown>;
+
+  let waDispatch: { gatewayConfigured: boolean; sent: boolean; normalizedPhone: string; error?: string } = {
+    gatewayConfigured: Boolean((process.env.WHATSAPP_API_URL || '').trim()),
+    sent: false,
+    normalizedPhone: normalizeWhatsappServer(student.parent_whatsapp),
+  };
+
+  if (auto_send_wa !== false && waDispatch.gatewayConfigured && student.parent_whatsapp) {
+    const waText = buildAttendanceWaTextServer({
+      studentName: student.full_name,
+      kelas: student.kelas,
+      division: student.division,
+      actionType,
+      status: String(record.status || resolvedStatus),
+      attendanceDate,
+      checkInTime: String(record.check_in_time || scanTime),
+      checkOutTime: String(record.check_out_time || scanTime),
+      tzLabel: clientNow.tzLabel,
+      method: scanMethod,
+      sessionTitle: String(record.session_title || resolvedSession),
+      recordedBy,
+    });
+    waDispatch = await dispatchWhatsappGateway(student.parent_whatsapp, waText);
+    if (waDispatch.sent) {
+      db.prepare(
+        actionType === 'check_out'
+          ? 'UPDATE attendance_records SET wa_notified_out = 1 WHERE id = ?'
+          : 'UPDATE attendance_records SET wa_notified_in = 1 WHERE id = ?'
+      ).run(record.id);
+      record = {
+        ...record,
+        ...(actionType === 'check_out' ? { wa_notified_out: 1 } : { wa_notified_in: 1 }),
+      };
+    }
+  }
 
   broadcastEvent({ type: 'attendance:recorded', payload: record });
 
   createAndBroadcastNotification({
     userId: student.id,
     type: 'attendance',
-    title: `Absensi ${scanMethod} Tercatat`,
-    message: `${student.full_name} tercatat ${resolvedStatus} pada ${attendanceDate} pukul ${checkInTime} ${clientNow.tzLabel} (${resolvedSession}).`,
+    title: actionType === 'check_out' ? `Absen Pulang ${scanMethod} Tercatat` : `Absen Masuk ${scanMethod} Tercatat`,
+    message:
+      actionType === 'check_out'
+        ? `${student.full_name} tercatat Absen Pulang pada ${attendanceDate} pukul ${scanTime} ${clientNow.tzLabel} (${String(record.session_title || resolvedSession)}).`
+        : `${student.full_name} tercatat Absen Masuk (${resolvedStatus}) pada ${attendanceDate} pukul ${scanTime} ${clientNow.tzLabel} (${resolvedSession}).`,
     linkTarget: `profil/${student.username}`,
   });
 
@@ -893,15 +1303,78 @@ app.post('/api/attendance/scan', requireAdmin, (req: AuthedRequest, res) => {
 
   res.json({
     alreadyRecorded: Boolean(existingToday),
+    action_type: actionType,
     record,
+    wa_dispatch: waDispatch,
     student: {
       id: student.id,
       username: student.username,
       full_name: student.full_name,
       kelas: student.kelas,
       division: student.division,
+      parent_whatsapp: student.parent_whatsapp || '',
     },
   });
+});
+
+app.post('/api/attendance/send-wa', requireAdmin, async (req, res) => {
+  const { phone, message, record_id, action_type, mark_only, items } = req.body as {
+    phone?: string;
+    message?: string;
+    record_id?: number;
+    action_type?: 'check_in' | 'check_out' | 'monthly';
+    mark_only?: boolean;
+    items?: Array<{ phone: string; message: string; student_name?: string }>;
+  };
+
+  if (Array.isArray(items) && items.length > 0) {
+    const gatewayConfigured = Boolean((process.env.WHATSAPP_API_URL || '').trim());
+    if (!gatewayConfigured) {
+      res.status(400).json({ error: 'WHATSAPP_API_URL belum dikonfigurasi pada environment server. Gunakan tombol Kirim WA Langsung per siswa.' });
+      return;
+    }
+    let sentCount = 0;
+    let failedCount = 0;
+    const errors: string[] = [];
+    for (const item of items.slice(0, 60)) {
+      const result = await dispatchWhatsappGateway(item.phone, item.message);
+      if (result.sent) {
+        sentCount++;
+      } else {
+        failedCount++;
+        if (result.error) errors.push(`${item.student_name || item.phone}: ${result.error}`);
+      }
+    }
+    res.json({ ok: true, gatewayConfigured: true, sentCount, failedCount, errors });
+    return;
+  }
+
+  if (mark_only && record_id) {
+    db.prepare(
+      action_type === 'check_out'
+        ? 'UPDATE attendance_records SET wa_notified_out = 1 WHERE id = ?'
+        : 'UPDATE attendance_records SET wa_notified_in = 1 WHERE id = ?'
+    ).run(record_id);
+    checkpointDatabase('PASSIVE');
+    res.json({ ok: true, marked: true });
+    return;
+  }
+
+  if (!phone || !message) {
+    res.status(400).json({ error: 'Nomor WhatsApp orang tua dan isi pesan wajib diisi.' });
+    return;
+  }
+
+  const dispatch = await dispatchWhatsappGateway(phone, message);
+  if (dispatch.sent && record_id) {
+    db.prepare(
+      action_type === 'check_out'
+        ? 'UPDATE attendance_records SET wa_notified_out = 1 WHERE id = ?'
+        : 'UPDATE attendance_records SET wa_notified_in = 1 WHERE id = ?'
+    ).run(record_id);
+    checkpointDatabase('PASSIVE');
+  }
+  res.json({ ok: dispatch.sent, ...dispatch });
 });
 
 app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
@@ -917,22 +1390,23 @@ app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
   const totalSessions = Math.max(totalSessionsRow.cnt, 1);
 
   const students = db.prepare(`
-    SELECT id, full_name, username, nis, kelas, division
+    SELECT id, full_name, username, nis, kelas, division, parent_whatsapp
     FROM users
     WHERE role = 'student'
     ORDER BY nis ASC
-  `).all() as Array<{ id: number; full_name: string; username: string; nis: string; kelas: string; division: string }>;
+  `).all() as Array<{ id: number; full_name: string; username: string; nis: string; kelas: string; division: string; parent_whatsapp: string }>;
 
   const rows = students.map((s) => {
     const records = db.prepare(`
-      SELECT status, method FROM attendance_records
+      SELECT status, method, check_out_time FROM attendance_records
       WHERE user_id = ? AND substr(attendance_date, 1, 7) = ?
       ORDER BY attendance_date DESC
-    `).all(s.id, month) as Array<{ status: string; method: string }>;
+    `).all(s.id, month) as Array<{ status: string; method: string; check_out_time: string }>;
 
     const hadirCount = records.filter((r) => r.status === 'Hadir').length;
     const terlambatCount = records.filter((r) => r.status === 'Terlambat').length;
     const izinCount = records.filter((r) => r.status === 'Izin').length;
+    const pulangCount = records.filter((r) => Boolean(r.check_out_time && r.check_out_time.trim())).length;
     const attended = hadirCount + terlambatCount;
     const alphaCount = Math.max(0, totalSessionsRow.cnt - (attended + izinCount));
     const attendanceRate = totalSessionsRow.cnt === 0 ? 0 : Math.round((attended / totalSessions) * 100);
@@ -944,11 +1418,13 @@ app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
       nis: s.nis,
       kelas: s.kelas,
       division: s.division,
+      parent_whatsapp: s.parent_whatsapp || '',
       total_sessions: totalSessionsRow.cnt,
       hadir_count: hadirCount,
       terlambat_count: terlambatCount,
       izin_count: izinCount,
       alpha_count: alphaCount,
+      pulang_count: pulangCount,
       attendance_rate: attendanceRate,
       last_method: records[0]?.method || null,
     };
@@ -959,21 +1435,62 @@ app.get('/api/attendance/monthly-report', requireAdmin, (req, res) => {
 
 // ==================== STUDENT WORKS (IMAGE & VIDEO UPLOAD + SOCIAL + MODERATION) ====================
 
+function normalizeWorkMediaUrlServer(rawUrl: string, mediaType: 'image' | 'video'): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+  const filePathMatch = trimmed.match(/drive\.google\.com\/(?:file\/(?:u\/\d+\/)?d|thumbnail|open)\/?([a-zA-Z0-9_-]{15,})/i);
+  const paramMatch =
+    /drive\.google\.com|drive\.usercontent\.google\.com/i.test(trimmed)
+      ? trimmed.match(/[?&]id=([a-zA-Z0-9_-]{15,})/i)
+      : null;
+  const lh3Match = trimmed.match(/lh\d\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]{15,})/i);
+  const driveId = filePathMatch?.[1] || paramMatch?.[1] || lh3Match?.[1] || null;
+  if (driveId) {
+    return mediaType === 'video'
+      ? `https://drive.google.com/uc?export=download&id=${driveId}`
+      : `https://lh3.googleusercontent.com/d/${driveId}=w1600`;
+  }
+  return trimmed.slice(0, 500);
+}
+
 app.post('/api/works', requireAuth, upload.single('media'), (req: AuthedRequest, res) => {
-  const { title, description, category } = req.body as { title?: string; description?: string; category?: string };
+  const { title, description, category, media_url, media_type } = req.body as {
+    title?: string;
+    description?: string;
+    category?: string;
+    media_url?: string;
+    media_type?: string;
+  };
   const file = req.file;
 
-  if (!file) {
-    res.status(400).json({ error: 'File gambar atau video karya wajib dilampirkan.' });
-    return;
-  }
   if (!title || !title.trim()) {
     res.status(400).json({ error: 'Judul karya wajib diisi.' });
     return;
   }
 
-  const mediaType = file.mimetype.startsWith('video/') ? 'video' : 'image';
-  const mediaUrl = `/uploads/${file.filename}`;
+  let mediaType: 'image' | 'video' = media_type === 'video' ? 'video' : 'image';
+  let mediaUrl = '';
+
+  if (file) {
+    mediaType = file.mimetype.startsWith('video/') ? 'video' : 'image';
+    mediaUrl = `/uploads/${file.filename}`;
+  } else if (media_url && media_url.trim()) {
+    const candidate = media_url.trim();
+    const isValidProtocol =
+      candidate.startsWith('https://') ||
+      candidate.startsWith('http://') ||
+      candidate.startsWith('/uploads/') ||
+      candidate.startsWith('cloudfile://');
+    if (!isValidProtocol) {
+      res.status(400).json({ error: 'Tautan media harus berupa URL https:// atau Google Drive yang valid.' });
+      return;
+    }
+    mediaUrl = normalizeWorkMediaUrlServer(candidate, mediaType);
+  } else {
+    res.status(400).json({ error: 'File gambar/video atau tautan Google Drive karya wajib dilampirkan.' });
+    return;
+  }
+
   const now = new Date().toISOString();
   const isAdminUploader = req.user!.role === 'admin';
   const approvalStatus = isAdminUploader ? 'approved' : 'pending';

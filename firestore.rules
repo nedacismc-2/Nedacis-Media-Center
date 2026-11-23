@@ -141,6 +141,7 @@ service cloud.firestore {
           'isVisible',
           'ownerUid',
           'authHashes',
+          'nfcHash',
           'attendanceCount',
           'worksCount',
           'lmsPoints',
@@ -166,6 +167,7 @@ service cloud.firestore {
           && data.authHashes.size() <= 6
           && (data.authHashes.size() == 0 || isStr(data.authHashes[0], 64, 64))
         ))
+        && (!('nfcHash' in data) || isStr(data.nfcHash, 0, 64))
         && (!('attendanceCount' in data) || (data.attendanceCount is number && data.attendanceCount >= 0))
         && (!('worksCount' in data) || (data.worksCount is number && data.worksCount >= 0))
         && (!('lmsPoints' in data) || (data.lmsPoints is number && data.lmsPoints >= 0))
@@ -175,11 +177,12 @@ service cloud.firestore {
 
     function isValidMemberPrivate(data) {
       return data.keys().hasAll(['memberId', 'nis', 'nfcUid', 'updatedAt'])
-        && data.keys().hasOnly(['memberId', 'ownerUid', 'nis', 'nfcUid', 'email', 'updatedAt'])
+        && data.keys().hasOnly(['memberId', 'ownerUid', 'nis', 'nfcUid', 'parentWhatsapp', 'email', 'updatedAt'])
         && isValidId(data.memberId)
         && (!('ownerUid' in data) || isStr(data.ownerUid, 0, 128))
         && isStr(data.nis, 1, 40)
         && isStr(data.nfcUid, 2, 64)
+        && (!('parentWhatsapp' in data) || isStr(data.parentWhatsapp, 0, 30))
         && (!('email' in data) || isStr(data.email, 0, 160))
         && data.updatedAt is timestamp;
     }
@@ -394,11 +397,15 @@ service cloud.firestore {
           'division',
           'attendanceDate',
           'checkInTime',
+          'checkOutTime',
           'method',
+          'checkOutMethod',
           'status',
           'sessionTitle',
           'recordedBy',
           'recordedByUid',
+          'waNotifiedIn',
+          'waNotifiedOut',
           'createdAt'
         ])
         && isValidId(data.memberId)
@@ -409,11 +416,15 @@ service cloud.firestore {
         && (!('division' in data) || isStr(data.division, 0, 40))
         && isStr(data.attendanceDate, 8, 20)
         && isStr(data.checkInTime, 4, 20)
+        && (!('checkOutTime' in data) || isStr(data.checkOutTime, 0, 20))
         && (data.method in ['NFC/RFID', 'QR Scan', 'Manual Admin'])
+        && (!('checkOutMethod' in data) || data.checkOutMethod == '' || (data.checkOutMethod in ['NFC/RFID', 'QR Scan', 'Manual Admin']))
         && (data.status in ['Hadir', 'Terlambat', 'Izin'])
         && isStr(data.sessionTitle, 1, 180)
         && isStr(data.recordedBy, 1, 120)
         && isStr(data.recordedByUid, 1, 128)
+        && (!('waNotifiedIn' in data) || data.waNotifiedIn is bool)
+        && (!('waNotifiedOut' in data) || data.waNotifiedOut is bool)
         && data.createdAt is timestamp;
     }
 
@@ -656,7 +667,7 @@ service cloud.firestore {
           )
           || (
             isPortalMemberId(memberId)
-            && incoming().diff(existing()).affectedKeys().hasOnly(['avatarUrl', 'updatedAt'])
+            && incoming().diff(existing()).affectedKeys().hasOnly(['avatarUrl', 'bio', 'division', 'updatedAt'])
           )
         );
       allow delete: if isValidId(memberId) && isAdmin();
@@ -676,7 +687,7 @@ service cloud.firestore {
         && isValidMemberPrivate(incoming())
         && incoming().memberId == existing().memberId
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerUid', 'nis', 'nfcUid', 'email', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['ownerUid', 'nis', 'nfcUid', 'parentWhatsapp', 'email', 'updatedAt']);
       allow delete: if isValidId(memberId) && isAdmin();
     }
 
@@ -749,15 +760,18 @@ service cloud.firestore {
 
     match /works/{workId} {
       allow get: if isValidId(workId) && (
-        existing().approvalStatus == 'approved'
+        resource == null
+        || existing().approvalStatus == 'approved'
         || existing().approvalStatus == 'pending'
         || isAdmin()
         || (isVerifiedUser() && existing().authorUid == request.auth.uid)
+        || (existing().authorMemberId is string && existing().authorMemberId.size() >= 1)
       );
       allow list: if existing().approvalStatus == 'approved'
         || existing().approvalStatus == 'pending'
         || isAdmin()
-        || (isVerifiedUser() && existing().authorUid == request.auth.uid);
+        || (isVerifiedUser() && existing().authorUid == request.auth.uid)
+        || (existing().authorMemberId is string && existing().authorMemberId.size() >= 1);
       allow create: if isValidId(workId)
         && isValidStudentWork(incoming())
         && incoming().likesCount == 0
@@ -826,7 +840,12 @@ service cloud.firestore {
             && incoming().sharesCount == existing().sharesCount + 1
           )
         );
-      allow delete: if isValidId(workId) && (isAdmin() || (isVerifiedUser() && existing().authorUid == request.auth.uid));
+      allow delete: if isValidId(workId) && (
+        isAdmin()
+        || (isVerifiedUser() && existing().authorUid == request.auth.uid)
+        || isPortalPembinaId(existing().authorMemberId)
+        || (existing().approvalStatus != 'approved' && isPortalMemberId(existing().authorMemberId))
+      );
 
       match /comments/{commentId} {
         allow get: if isValidId(workId)
@@ -891,6 +910,7 @@ service cloud.firestore {
     match /attendance_records/{recordId} {
       allow get: if isValidId(recordId) && (
         isAdmin()
+        || resource == null
         || (isVerifiedUser() && existing().studentUid == request.auth.uid)
         || (existing().memberId is string && existing().memberId.size() >= 1)
       );
@@ -908,12 +928,24 @@ service cloud.firestore {
       allow update: if isValidId(recordId)
         && isValidAttendanceRecord(incoming())
         && incoming().memberId == existing().memberId
+        && incoming().attendanceDate == existing().attendanceDate
         && incoming().createdAt == existing().createdAt
         && (
           isAdmin()
           || isPortalPembinaId(incoming().recordedByUid)
         )
-        && incoming().diff(existing()).affectedKeys().hasOnly(['checkInTime', 'method', 'status', 'sessionTitle', 'recordedBy', 'recordedByUid']);
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'checkInTime',
+          'checkOutTime',
+          'method',
+          'checkOutMethod',
+          'status',
+          'sessionTitle',
+          'recordedBy',
+          'recordedByUid',
+          'waNotifiedIn',
+          'waNotifiedOut'
+        ]);
       allow delete: if isValidId(recordId) && isAdmin();
     }
 
@@ -964,6 +996,7 @@ service cloud.firestore {
     match /lms_task_progress/{progressId} {
       allow get: if isValidId(progressId) && (
         isAdmin()
+        || resource == null
         || (isVerifiedUser() && existing().userUid == request.auth.uid)
         || (existing().userUid is string && existing().userUid.size() >= 1)
       );
@@ -995,6 +1028,7 @@ service cloud.firestore {
     match /lms_task_submissions/{submissionId} {
       allow get: if isValidId(submissionId) && (
         isAdmin()
+        || resource == null
         || (isVerifiedUser() && existing().userUid == request.auth.uid)
         || (existing().taskId is string && existing().userUid is string)
       );
@@ -1066,6 +1100,7 @@ service cloud.firestore {
     match /notifications/{notifId} {
       allow get: if isValidId(notifId) && (
         isAdmin()
+        || resource == null
         || (isVerifiedUser() && (existing().targetUid == request.auth.uid || existing().targetUid == 'ALL'))
         || (existing().targetUid is string && existing().targetUid.size() >= 1)
       );
@@ -1079,7 +1114,7 @@ service cloud.firestore {
         && (
           isAdmin()
           || (isVerifiedUser() && incoming().type in ['like', 'comment', 'share', 'moderation', 'task'])
-          || (incoming().type == 'attendance' && isPortalMemberId(incoming().targetUid))
+          || (incoming().type in ['attendance', 'moderation', 'task'] && isPortalMemberId(incoming().targetUid))
         );
       allow update: if isValidId(notifId)
         && isValidNotification(incoming())
@@ -1097,7 +1132,8 @@ service cloud.firestore {
 
     match /uploaded_files/{fileId} {
       allow get: if isValidId(fileId) && (
-        existing().isPublic == true
+        resource == null
+        || existing().isPublic == true
         || isAdmin()
         || (isVerifiedUser() && existing().uploaderUid == request.auth.uid)
       );

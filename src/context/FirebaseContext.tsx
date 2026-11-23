@@ -6,7 +6,16 @@ import {
   type User as FirebaseUser,
 } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
-import { auth, db, googleProvider, handleFirestoreError, OperationType, testConnection } from '../lib/firebase';
+import {
+  auth,
+  db,
+  googleProvider,
+  handleFirestoreError,
+  isQuotaExceededError,
+  markFirestoreQuotaExceeded,
+  OperationType,
+  testConnection,
+} from '../lib/firebase';
 
 const BOOTSTRAP_ADMIN_EMAIL = 'nedacismc@gmail.com';
 
@@ -98,11 +107,15 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           });
         }
       } catch (err) {
-        // Log non-fatal profile sync issues cleanly without crashing sign-in
-        try {
-          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
-        } catch {
-          // swallow inside auth listener
+        if (isQuotaExceededError(err)) {
+          markFirestoreQuotaExceeded();
+        } else {
+          // Log non-fatal profile sync issues cleanly without crashing sign-in
+          try {
+            handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+          } catch {
+            // swallow inside auth listener
+          }
         }
       } finally {
         setFirebaseAuthReady(true);

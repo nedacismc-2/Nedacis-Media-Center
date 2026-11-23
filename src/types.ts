@@ -19,11 +19,13 @@ export interface StudentProfile {
   bio: string;
   nfc_uid: string;
   qr_code_token: string;
+  parent_whatsapp?: string;
   avatar_color: string;
   avatar_url?: string;
   show_in_members?: number;
   owner_uid?: string;
   auth_hashes?: string[];
+  nfc_hash?: string;
   created_at: string;
   attendance_count?: number;
   works_count?: number;
@@ -110,12 +112,17 @@ export interface AttendanceRecord {
   kelas: string;
   division: string;
   nfc_uid: string;
+  parent_whatsapp?: string;
   attendance_date: string;
   check_in_time: string;
+  check_out_time?: string;
   method: 'NFC/RFID' | 'QR Scan' | 'Manual Admin';
+  check_out_method?: 'NFC/RFID' | 'QR Scan' | 'Manual Admin' | '';
   status: 'Hadir' | 'Terlambat' | 'Izin';
   session_title: string;
   recorded_by: string;
+  wa_notified_in?: boolean | number;
+  wa_notified_out?: boolean | number;
   created_at: string;
 }
 
@@ -138,11 +145,13 @@ export interface MonthlyReportRow {
   nis: string;
   kelas: string;
   division: string;
+  parent_whatsapp?: string;
   total_sessions: number;
   hadir_count: number;
   terlambat_count: number;
   izin_count: number;
   alpha_count: number;
+  pulang_count?: number;
   attendance_rate: number;
   last_method: string | null;
 }

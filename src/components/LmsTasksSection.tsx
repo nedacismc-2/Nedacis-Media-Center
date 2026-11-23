@@ -26,6 +26,7 @@ import { CloudFileAttachment } from './CloudMedia';
 interface LmsTasksSectionProps {
   currentUser: StudentProfile;
   tasks: LmsTask[];
+  cloudSeeded?: boolean;
   initialSelectedTaskId?: number | null;
   onTaskUpdated: (task: LmsTask, newTotalPoints?: number) => void;
   onToast: (message: string, variant?: 'success' | 'error' | 'info') => void;
@@ -34,6 +35,7 @@ interface LmsTasksSectionProps {
 export function LmsTasksSection({
   currentUser,
   tasks,
+  cloudSeeded = false,
   initialSelectedTaskId = null,
   onTaskUpdated,
   onToast,
@@ -124,45 +126,55 @@ export function LmsTasksSection({
       const responseText = practiceNotes[stage.id] || '';
       let updatedTask: LmsTask | null = null;
 
-      if (task.firestoreId && stage.firestoreId) {
-        await completeLmsStageInFirestore({
-          taskId: task.firestoreId,
-          stageId: stage.firestoreId,
-          responseText,
-          memberId: memberDocId,
-        });
-        const nextProgress = [
-          ...task.progress.filter((p) => p.stage_id !== stage.id),
-          {
-            stage_id: stage.id,
-            stageFirestoreId: stage.firestoreId,
-            response_text: responseText,
-            completed_at: new Date().toISOString(),
-          },
-        ];
-        updatedTask = { ...task, progress: nextProgress };
+      if (cloudSeeded && task.firestoreId && stage.firestoreId) {
+        try {
+          await completeLmsStageInFirestore({
+            taskId: task.firestoreId,
+            stageId: stage.firestoreId,
+            responseText,
+            memberId: memberDocId,
+          });
+          const nextProgress = [
+            ...task.progress.filter((p) => p.stage_id !== stage.id),
+            {
+              stage_id: stage.id,
+              stageFirestoreId: stage.firestoreId,
+              response_text: responseText,
+              completed_at: new Date().toISOString(),
+            },
+          ];
+          updatedTask = { ...task, progress: nextProgress };
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
 
       if (getStoredToken()) {
         try {
           const res = await apiFetch<{ task: LmsTask }>(`/api/tasks/${task.id}/stages/${stage.id}/complete`, {
             method: 'POST',
-            body: JSON.stringify({ responseText }),
+            body: JSON.stringify({
+              responseText,
+              task_title: task.title,
+              stage_order: stage.stage_order,
+            }),
           });
-          if (!updatedTask) updatedTask = res.task;
+          if (!updatedTask && res?.task) updatedTask = res.task;
         } catch (err) {
           if (!updatedTask) throw err;
         }
       }
 
-      if (updatedTask) {
-        onTaskUpdated(updatedTask);
+      if (!updatedTask) {
+        throw new Error('Gagal menyimpan progres tahap ke server.');
       }
+
+      onTaskUpdated(updatedTask);
       const nextIdx = task.stages.findIndex((s) => s.id === stage.id) + 1;
       if (nextIdx < task.stages.length) {
         setActiveStageIdx(nextIdx);
       }
-      onToast(`Tahap "${stage.title}" selesai & tersimpan di Firebase! Tahap berikutnya kini terbuka.`, 'success');
+      onToast(`Tahap "${stage.title}" selesai & tersimpan! Tahap berikutnya kini terbuka.`, 'success');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menyelesaikan tahap ini.', 'error');
     } finally {
@@ -172,6 +184,10 @@ export function LmsTasksSection({
 
   const handleSubmitFinalTask = async (e: FormEvent, task: LmsTask) => {
     e.preventDefault();
+    if (task.submission?.status === 'approved') {
+      onToast('Tugas ini sudah disetujui Pembina dan tidak perlu diunggah ulang.', 'info');
+      return;
+    }
     if (!uploadFile && !task.submission?.file_url) {
       onToast('Silakan pilih file hasil tugas terlebih dahulu untuk diunggah.', 'error');
       return;
@@ -184,60 +200,96 @@ export function LmsTasksSection({
       let fileUrl = task.submission?.file_url || '';
       let fileName = uploadFile?.name || task.submission?.file_name || 'tugas-siswa';
       let fileType = uploadFile?.type || task.submission?.file_type || '';
+      const uploadStage = task.stages.find((s) => s.stage_type === 'upload') || task.stages[task.stages.length - 1];
 
-      if (uploadFile) {
-        const uploaded = await uploadFileToCloud(uploadFile, {
-          isPublic: true,
-          uploaderMemberId: effectiveActorId,
-        });
-        fileUrl = uploaded.cloudUrl;
-        fileName = uploaded.fileName;
-        fileType = uploaded.mimeType;
+      if (cloudSeeded && task.firestoreId) {
+        try {
+          if (uploadFile) {
+            const uploaded = await uploadFileToCloud(uploadFile, {
+              isPublic: true,
+              uploaderMemberId: effectiveActorId,
+            });
+            fileUrl = uploaded.cloudUrl;
+            fileName = uploaded.fileName;
+            fileType = uploaded.mimeType;
+          }
+
+          const subId = await submitLmsTaskInFirestore({
+            taskId: task.firestoreId,
+            fileUrl,
+            fileName,
+            fileType,
+            submissionNote: submissionNote.trim(),
+            memberId: memberDocId,
+            fullName: currentUser.full_name,
+            username: currentUser.username,
+            kelas: currentUser.kelas,
+            division: currentUser.division,
+          });
+
+          let nextProgress = task.progress;
+          if (uploadStage?.firestoreId) {
+            await completeLmsStageInFirestore({
+              taskId: task.firestoreId,
+              stageId: uploadStage.firestoreId,
+              responseText: submissionNote.trim(),
+              memberId: memberDocId,
+            }).catch(() => {});
+            nextProgress = [
+              ...task.progress.filter((p) => p.stage_id !== uploadStage.id),
+              {
+                stage_id: uploadStage.id,
+                stageFirestoreId: uploadStage.firestoreId,
+                response_text: submissionNote.trim(),
+                completed_at: new Date().toISOString(),
+              },
+            ];
+          }
+
+          updatedTask = {
+            ...task,
+            progress: nextProgress,
+            submission: {
+              id: Date.now(),
+              firestoreId: subId,
+              userUid: effectiveActorId,
+              task_id: task.id,
+              user_id: currentUser.id,
+              file_url: fileUrl,
+              file_name: fileName,
+              file_type: fileType,
+              submission_note: submissionNote.trim(),
+              status: 'submitted',
+              points_awarded: 0,
+              admin_feedback: '',
+              submitted_at: new Date().toISOString(),
+              reviewed_at: '',
+            },
+          };
+
+          if (getStoredToken()) {
+            void apiFetch(`/api/tasks/${task.id}/submit`, {
+              method: 'POST',
+              body: JSON.stringify({
+                submissionNote: submissionNote.trim(),
+                task_title: task.title,
+                file_url: fileUrl,
+                file_name: fileName,
+                file_type: fileType,
+                cloud_synced: true,
+              }),
+            }).catch(() => {});
+          }
+        } catch (cloudErr) {
+          if (!getStoredToken()) throw cloudErr;
+        }
       }
 
-      if (task.firestoreId) {
-        const subId = await submitLmsTaskInFirestore({
-          taskId: task.firestoreId,
-          fileUrl,
-          fileName,
-          fileType,
-          submissionNote: submissionNote.trim(),
-          memberId: memberDocId,
-          fullName: currentUser.full_name,
-          username: currentUser.username,
-          kelas: currentUser.kelas,
-          division: currentUser.division,
-        });
-        updatedTask = {
-          ...task,
-          submission: {
-            id: Date.now(),
-            firestoreId: subId,
-            userUid: effectiveActorId,
-            task_id: task.id,
-            user_id: currentUser.id,
-            file_url: fileUrl,
-            file_name: fileName,
-            file_type: fileType,
-            submission_note: submissionNote.trim(),
-            status: 'submitted',
-            points_awarded: 0,
-            admin_feedback: '',
-            submitted_at: new Date().toISOString(),
-            reviewed_at: '',
-          },
-        };
-
-        if (getStoredToken()) {
-          const mirrorForm = new FormData();
-          if (uploadFile) mirrorForm.append('file', uploadFile);
-          mirrorForm.append('submissionNote', submissionNote.trim());
-          void apiFetch(`/api/tasks/${task.id}/submit`, { method: 'POST', body: mirrorForm }).catch(() => {});
-        }
-      } else if (getStoredToken()) {
+      if (!updatedTask && getStoredToken()) {
         const formData = new FormData();
         if (uploadFile) formData.append('file', uploadFile);
         formData.append('submissionNote', submissionNote.trim());
+        formData.append('task_title', task.title);
         const res = await apiFetch<{ task: LmsTask; totalPoints: number }>(`/api/tasks/${task.id}/submit`, {
           method: 'POST',
           body: formData,
@@ -246,14 +298,16 @@ export function LmsTasksSection({
         nextTotalPoints = res.totalPoints;
       }
 
-      if (updatedTask) {
-        onTaskUpdated(updatedTask, nextTotalPoints);
+      if (!updatedTask) {
+        throw new Error('Gagal mengunggah hasil tugas ke server.');
       }
+
+      onTaskUpdated(updatedTask, nextTotalPoints);
       handleSelectUploadFile(null);
       onToast(
         nextTotalPoints !== undefined
           ? `Tugas "${task.title}" berhasil diunggah! Anda memperoleh +${task.points_reward} Poin.`
-          : `Tugas "${task.title}" tersimpan di Firebase dan menunggu verifikasi poin Pembina.`,
+          : `Tugas "${task.title}" tersimpan di server & menunggu verifikasi poin Pembina.`,
         'success'
       );
     } catch (err) {
@@ -695,71 +749,77 @@ export function LmsTasksSection({
                           </div>
                         )}
 
-                        <form onSubmit={(e) => handleSubmitFinalTask(e, selectedTask)} className="space-y-4">
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                              {selectedTask.submission
-                                ? 'Ganti / Unggah Ulang File Hasil Tugas (maks 15MB)'
-                                : 'Upload File Hasil Tugas (Foto, Video, PDF, Dokumen, Audio, atau ZIP · maks 15MB)'}
-                            </label>
-                            <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
-                              <UploadCloud className="w-6 h-6 text-[#1D4ED8]" />
-                              <span className="text-xs font-medium text-slate-700 text-center">
-                                {uploadFile
-                                  ? `${uploadFile.name} (${Math.max(1, Math.round(uploadFile.size / 1024))} KB)`
-                                  : 'Klik untuk memilih file hasil pengerjaan tugas'}
-                              </span>
-                              <input
-                                type="file"
-                                accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip"
-                                className="hidden"
-                                onChange={(e) => handleSelectUploadFile(e.target.files?.[0] || null)}
+                        {selectedTask.submission?.status === 'approved' ? (
+                          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                            Pengumpulan tugas ini sudah dinilai dan disetujui oleh Pembina.
+                          </div>
+                        ) : (
+                          <form onSubmit={(e) => handleSubmitFinalTask(e, selectedTask)} className="space-y-4">
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                                {selectedTask.submission
+                                  ? 'Ganti / Unggah Ulang File Hasil Tugas (maks 15MB)'
+                                  : 'Upload File Hasil Tugas (Foto, Video, PDF, Dokumen, Audio, atau ZIP · maks 15MB)'}
+                              </label>
+                              <label className="flex flex-col items-center justify-center gap-2 border border-dashed border-slate-300 rounded-xl p-6 cursor-pointer hover:bg-slate-50 transition-colors">
+                                <UploadCloud className="w-6 h-6 text-[#1D4ED8]" />
+                                <span className="text-xs font-medium text-slate-700 text-center">
+                                  {uploadFile
+                                    ? `${uploadFile.name} (${Math.max(1, Math.round(uploadFile.size / 1024))} KB)`
+                                    : 'Klik untuk memilih file hasil pengerjaan tugas'}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip"
+                                  className="hidden"
+                                  onChange={(e) => handleSelectUploadFile(e.target.files?.[0] || null)}
+                                />
+                              </label>
+
+                              {uploadPreviewUrl && uploadFile && (
+                                <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-52">
+                                  {uploadFile.type.startsWith('video/') ? (
+                                    <video src={uploadPreviewUrl} controls className="w-full max-h-52 object-contain" />
+                                  ) : (
+                                    <img src={uploadPreviewUrl} alt="Pratinjau tugas" className="w-full max-h-52 object-cover" />
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                                Keterangan Pengerjaan Tugas (Opsional)
+                              </label>
+                              <textarea
+                                rows={3}
+                                value={submissionNote}
+                                onChange={(e) => setSubmissionNote(e.target.value)}
+                                placeholder="Tambahkan catatan singkat atau penjelasan karya/tugas yang Anda unggah..."
+                                className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
                               />
-                            </label>
+                            </div>
 
-                            {uploadPreviewUrl && uploadFile && (
-                              <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 max-h-52">
-                                {uploadFile.type.startsWith('video/') ? (
-                                  <video src={uploadPreviewUrl} controls className="w-full max-h-52 object-contain" />
-                                ) : (
-                                  <img src={uploadPreviewUrl} alt="Pratinjau tugas" className="w-full max-h-52 object-cover" />
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                              Keterangan Pengerjaan Tugas (Opsional)
-                            </label>
-                            <textarea
-                              rows={3}
-                              value={submissionNote}
-                              onChange={(e) => setSubmissionNote(e.target.value)}
-                              placeholder="Tambahkan catatan singkat atau penjelasan karya/tugas yang Anda unggah..."
-                              className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
-                            />
-                          </div>
-
-                          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-                            <p className="text-xs text-slate-500">
-                              Mengunggah tugas akhir otomatis mencatat penyelesaian dan menambahkan{' '}
-                              <strong className="text-slate-800">+{selectedTask.points_reward} poin</strong>.
-                            </p>
-                            <button
-                              type="submit"
-                              disabled={submittingTask}
-                              className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 rounded-xl min-h-[44px]"
-                            >
-                              <UploadCloud className="w-4 h-4" />
-                              {submittingTask
-                                ? 'Mengunggah Tugas...'
-                                : selectedTask.submission
-                                ? 'Kirim Pembaruan Tugas'
-                                : `Upload & Selesaikan (+${selectedTask.points_reward} Poin)`}
-                            </button>
-                          </div>
-                        </form>
+                            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                              <p className="text-xs text-slate-500">
+                                Mengunggah tugas akhir otomatis mencatat penyelesaian dan mengajukan{' '}
+                                <strong className="text-slate-800">+{selectedTask.points_reward} poin</strong>.
+                              </p>
+                              <button
+                                type="submit"
+                                disabled={submittingTask}
+                                className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 rounded-xl min-h-[44px]"
+                              >
+                                <UploadCloud className="w-4 h-4" />
+                                {submittingTask
+                                  ? 'Mengunggah Tugas...'
+                                  : selectedTask.submission
+                                  ? 'Kirim Pembaruan Tugas'
+                                  : `Upload & Selesaikan (+${selectedTask.points_reward} Poin)`}
+                              </button>
+                            </div>
+                          </form>
+                        )}
                       </div>
                     )}
                   </div>

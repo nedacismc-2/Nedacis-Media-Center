@@ -64,12 +64,21 @@ import {
   deleteBlockedWordInFirestore,
   deleteLmsTaskInFirestore,
   deleteStudentFromFirestore,
+  importStudentsToFirestore,
   reviewLmsSubmissionInFirestore,
   reviewWorkInFirestore,
   sanitizeDocId,
   saveSiteSettingsToFirestore,
   saveStudentToFirestore,
 } from '../lib/firestoreSync';
+import {
+  buildMembersCsv,
+  buildMembersJson,
+  buildMembersTemplateCsv,
+  parseAndValidateMemberImport,
+  triggerTextFileDownload,
+  type MemberImportPreview,
+} from '../lib/memberExportImport';
 import { HERO_IMAGE, formatDateID, formatTimeAgo } from '../lib/mediaAssets';
 import { CloudFileAttachment, CloudImage, CloudVideo } from './CloudMedia';
 import { NmcLogo } from './NmcLogo';
@@ -147,7 +156,22 @@ export function AdminSection({
   const [kelas, setKelas] = useState('8A');
   const [division, setDivision] = useState('Fotografi');
   const [nfcUid, setNfcUid] = useState('');
+  const [parentWhatsapp, setParentWhatsapp] = useState('');
   const [creatingStudent, setCreatingStudent] = useState(false);
+
+  // Export / Import Member Data state
+  const [importOverwrite, setImportOverwrite] = useState(true);
+  const [importRawFile, setImportRawFile] = useState<{ name: string; content: string } | null>(null);
+  const [importPreview, setImportPreview] = useState<MemberImportPreview | null>(null);
+  const [importParseError, setImportParseError] = useState('');
+  const [importingMembers, setImportingMembers] = useState(false);
+  const [importResultSummary, setImportResultSummary] = useState<{
+    created: number;
+    updated: number;
+    skipped: number;
+    errors: string[];
+  } | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
 
   // Edit Full Student Profile state
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -159,6 +183,7 @@ export function AdminSection({
   const [editBio, setEditBio] = useState('');
   const [editNfc, setEditNfc] = useState('');
   const [editQrToken, setEditQrToken] = useState('');
+  const [editParentWhatsapp, setEditParentWhatsapp] = useState('');
   const [editAvatarColor, setEditAvatarColor] = useState('#1D4ED8');
   const [editPass, setEditPass] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
@@ -620,6 +645,7 @@ export function AdminSection({
           bio: `Peserta aktif divisi ${division} Nedacis Media Center SMPN 2 Ciamis.`,
           nfc_uid: (nfcUid || `04${Date.now().toString(16).slice(-8)}`).toUpperCase(),
           qr_code_token: `NMC-${cleanUser.toUpperCase().slice(0, 8)}`,
+          parent_whatsapp: parentWhatsapp.trim(),
           avatar_color: '#1D4ED8',
           show_in_members: true,
           password: password.trim() || undefined,
@@ -636,6 +662,7 @@ export function AdminSection({
             kelas,
             division,
             nfc_uid: nfcUid || undefined,
+            parent_whatsapp: parentWhatsapp.trim() || undefined,
           }),
         }).catch((err) => {
           if (!auth.currentUser || !isFirebaseAdmin) throw err;
@@ -645,6 +672,7 @@ export function AdminSection({
       setFullName('');
       setNis('');
       setNfcUid('');
+      setParentWhatsapp('');
       onMembersChanged();
       onToast('Akun siswa baru berhasil dibuat dan tersimpan di Cloud.', 'success');
     } catch (err) {
@@ -664,6 +692,7 @@ export function AdminSection({
     setEditBio(m.bio);
     setEditNfc(m.nfc_uid);
     setEditQrToken(m.qr_code_token);
+    setEditParentWhatsapp(m.parent_whatsapp || '');
     setEditAvatarColor(m.avatar_color || '#1D4ED8');
     setEditPass('');
     setUsbListeningMode('edit');
@@ -691,6 +720,7 @@ export function AdminSection({
           bio: editBio.trim(),
           nfc_uid: editNfc.trim(),
           qr_code_token: editQrToken.trim(),
+          parent_whatsapp: editParentWhatsapp.trim(),
           avatar_color: editAvatarColor,
           avatar_url: targetMember?.avatar_url,
           show_in_members: targetMember?.show_in_members !== 0,
@@ -709,6 +739,7 @@ export function AdminSection({
             bio: editBio,
             nfc_uid: editNfc,
             qr_code_token: editQrToken,
+            parent_whatsapp: editParentWhatsapp.trim(),
             avatar_color: editAvatarColor,
             password: editPass || undefined,
           }),
@@ -741,6 +772,158 @@ export function AdminSection({
       onToast(`Akun ${student.full_name} dihapus dari daftar peserta.`, 'info');
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal menghapus akun.', 'error');
+    }
+  };
+
+  useEffect(() => {
+    if (!importRawFile) return;
+    try {
+      const preview = parseAndValidateMemberImport(
+        importRawFile.name,
+        importRawFile.content,
+        members,
+        importOverwrite
+      );
+      setImportPreview(preview);
+      setImportParseError('');
+    } catch (err) {
+      setImportPreview(null);
+      setImportParseError(err instanceof Error ? err.message : 'Gagal membaca file import.');
+    }
+  }, [importRawFile, importOverwrite, members]);
+
+  const handleExportMembers = (format: 'csv' | 'json' | 'template') => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (format === 'template') {
+      triggerTextFileDownload(
+        'template-import-anggota-nmc.csv',
+        buildMembersTemplateCsv(),
+        'text/csv;charset=utf-8;'
+      );
+      onToast('Template CSV anggota berhasil diunduh.', 'success');
+      return;
+    }
+    if (members.length === 0) {
+      onToast('Belum ada data anggota untuk diekspor.', 'info');
+      return;
+    }
+    if (format === 'csv') {
+      triggerTextFileDownload(
+        `nmc-data-anggota-${today}.csv`,
+        buildMembersCsv(members),
+        'text/csv;charset=utf-8;'
+      );
+      onToast(`Berhasil mengekspor ${members.length} data anggota ke CSV.`, 'success');
+    } else {
+      triggerTextFileDownload(
+        `nmc-data-anggota-${today}.json`,
+        buildMembersJson(members),
+        'application/json;charset=utf-8;'
+      );
+      onToast(`Berhasil mengekspor ${members.length} data anggota ke JSON.`, 'success');
+    }
+  };
+
+  const handleImportFileSelected = async (file: File | undefined) => {
+    if (!file) return;
+    setImportResultSummary(null);
+    setImportParseError('');
+    try {
+      const text = await file.text();
+      setImportRawFile({ name: file.name, content: text });
+    } catch {
+      setImportParseError('Gagal membaca isi file yang dipilih.');
+      setImportPreview(null);
+    }
+  };
+
+  const handleClearImport = () => {
+    setImportRawFile(null);
+    setImportPreview(null);
+    setImportParseError('');
+    if (importFileInputRef.current) {
+      importFileInputRef.current.value = '';
+    }
+  };
+
+  const handleExecuteMemberImport = async () => {
+    if (!importPreview) return;
+    const actionable = importPreview.rows.filter(
+      (r) => r.action === 'create' || r.action === 'overwrite'
+    );
+    if (actionable.length === 0) {
+      onToast('Tidak ada baris data yang perlu dibuat atau ditimpa.', 'info');
+      return;
+    }
+
+    const canSyncCloud = Boolean(auth.currentUser && isFirebaseAdmin);
+    const hasLocalToken = Boolean(getStoredToken());
+    if (!canSyncCloud && !hasLocalToken) {
+      onToast('Hubungkan akun Google Admin terlebih dahulu untuk mengimport data anggota ke Cloud.', 'error');
+      return;
+    }
+
+    setImportingMembers(true);
+    try {
+      const payload = actionable.map((r) => r.data);
+      let finalSummary = {
+        created: 0,
+        updated: 0,
+        skipped: importPreview.skipCount,
+        errors: [] as string[],
+      };
+
+      if (canSyncCloud) {
+        const cloudRes = await importStudentsToFirestore(payload, {
+          overwrite: importOverwrite,
+          existingMembers: members,
+        });
+        finalSummary = {
+          created: cloudRes.created,
+          updated: cloudRes.updated,
+          skipped: importPreview.skipCount + cloudRes.skipped,
+          errors: [...cloudRes.errors],
+        };
+      }
+
+      if (hasLocalToken) {
+        const localRes = await apiFetch<{
+          created: number;
+          updated: number;
+          skipped: number;
+          errors?: string[];
+        }>('/api/admin/students/import', {
+          method: 'POST',
+          body: JSON.stringify({
+            students: payload,
+            overwrite: importOverwrite,
+          }),
+        }).catch((err) => {
+          if (!canSyncCloud) throw err;
+          return null;
+        });
+
+        if (localRes && !canSyncCloud) {
+          finalSummary = {
+            created: localRes.created,
+            updated: localRes.updated,
+            skipped: importPreview.skipCount + localRes.skipped,
+            errors: localRes.errors || [],
+          };
+        }
+      }
+
+      setImportResultSummary(finalSummary);
+      handleClearImport();
+      onMembersChanged();
+      onToast(
+        `Import selesai: ${finalSummary.created} baru, ${finalSummary.updated} ditimpa, ${finalSummary.skipped} dilewati.`,
+        finalSummary.errors.length > 0 ? 'info' : 'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Gagal mengimport data anggota.', 'error');
+    } finally {
+      setImportingMembers(false);
     }
   };
 
@@ -1683,6 +1866,323 @@ export function AdminSection({
                 </div>
               </div>
 
+              {/* Export & Import Member Data Card */}
+              <div className="border border-slate-200 rounded-xl p-5 space-y-4 bg-white">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Export &amp; Import Data Anggota (CSV / JSON)
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Unduh seluruh data anggota untuk diedit di Excel/Sheets, atau import file CSV/JSON dengan opsi menimpa data lama berdasarkan username.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleExportMembers('csv')}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Export CSV ({members.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportMembers('json')}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-blue-50 hover:bg-blue-100 text-[#1D4ED8] border border-blue-200 rounded-xl transition-colors"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      Export JSON
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleExportMembers('template')}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-xl transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Template CSV
+                    </button>
+                  </div>
+                </div>
+
+                {!isFirebaseAdmin && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                    <div className="flex items-start gap-2">
+                      <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                      <span>
+                        Untuk menyinkronkan hasil import &amp; penimpaan data anggota ke Cloud Firestore lintas perangkat, hubungkan akun Google Admin (<span className="font-mono font-semibold">NedacisMC@gmail.com</span>).
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={connectingGoogleAdmin}
+                      onClick={async () => {
+                        setConnectingGoogleAdmin(true);
+                        try {
+                          await signInWithGoogle();
+                          onToast('Google Admin terhubung. Import siap disinkronkan ke Cloud.', 'success');
+                        } catch (err) {
+                          onToast(err instanceof Error ? err.message : 'Gagal menghubungkan Google Admin.', 'error');
+                        } finally {
+                          setConnectingGoogleAdmin(false);
+                        }
+                      }}
+                      className="px-3 py-1.5 text-xs font-semibold bg-amber-600 hover:bg-amber-700 text-white rounded-lg whitespace-nowrap shrink-0 disabled:opacity-50"
+                    >
+                      {connectingGoogleAdmin ? 'Menghubungkan...' : 'Hubungkan Google Admin'}
+                    </button>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                  <div className="lg:col-span-7 space-y-2.5">
+                    <p className="text-xs font-semibold text-slate-700">Mode Konflik Username Saat Import</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <label
+                        className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-colors ${
+                          importOverwrite
+                            ? 'bg-amber-50/70 border-amber-400 text-slate-900'
+                            : 'bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="member-import-mode"
+                          checked={importOverwrite}
+                          onChange={() => setImportOverwrite(true)}
+                          className="mt-0.5 accent-[#B91C1C]"
+                        />
+                        <div className="text-xs">
+                          <p className="font-semibold text-slate-900">Timpa Data Lama</p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Jika username sudah ada, seluruh profil (nama, NIS, kelas, divisi, NFC, QR) ditimpa dengan data baru.
+                          </p>
+                        </div>
+                      </label>
+
+                      <label
+                        className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-colors ${
+                          !importOverwrite
+                            ? 'bg-blue-50/70 border-blue-400 text-slate-900'
+                            : 'bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="member-import-mode"
+                          checked={!importOverwrite}
+                          onChange={() => setImportOverwrite(false)}
+                          className="mt-0.5 accent-[#1D4ED8]"
+                        />
+                        <div className="text-xs">
+                          <p className="font-semibold text-slate-900">Lewati yang Sudah Ada</p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Hanya menambahkan anggota baru; data anggota lama dengan username sama tidak diubah.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="lg:col-span-5 space-y-2.5">
+                    <p className="text-xs font-semibold text-slate-700">Pilih File Import (.csv atau .json)</p>
+                    <label className="flex flex-col items-center justify-center gap-1.5 p-4 border-2 border-dashed border-slate-300 hover:border-[#1D4ED8] rounded-xl bg-slate-50/60 hover:bg-blue-50/30 cursor-pointer transition-colors text-center">
+                      <UploadCloud className="w-5 h-5 text-[#1D4ED8]" />
+                      <span className="text-xs font-semibold text-slate-800">
+                        {importRawFile ? importRawFile.name : 'Klik untuk pilih file CSV atau JSON'}
+                      </span>
+                      <span className="text-[11px] text-slate-500">
+                        Kolom kosong (mis. password/NFC) tetap mempertahankan nilai lama saat ditimpa
+                      </span>
+                      <input
+                        ref={importFileInputRef}
+                        type="file"
+                        accept=".csv,.json,text/csv,application/json"
+                        onChange={(e) => void handleImportFileSelected(e.target.files?.[0])}
+                        className="sr-only"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {importParseError && (
+                  <div className="flex items-center justify-between gap-2 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                    <div className="flex items-center gap-2">
+                      <XCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>{importParseError}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleClearImport}
+                      className="text-xs font-semibold text-rose-700 hover:underline shrink-0"
+                    >
+                      Tutup
+                    </button>
+                  </div>
+                )}
+
+                {importResultSummary && (
+                  <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-semibold">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>
+                          Hasil Import: {importResultSummary.created} akun baru, {importResultSummary.updated} akun ditimpa, {importResultSummary.skipped} dilewati.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setImportResultSummary(null)}
+                        className="text-[11px] font-semibold text-emerald-700 hover:underline"
+                      >
+                        Tutup
+                      </button>
+                    </div>
+                    {importResultSummary.errors.length > 0 && (
+                      <ul className="list-disc pl-5 text-rose-700 space-y-0.5">
+                        {importResultSummary.errors.slice(0, 6).map((err, i) => (
+                          <li key={i}>{err}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
+                {importPreview && (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-50/40">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-100/80 border-b border-slate-200">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-semibold text-slate-900">
+                          Pratinjau: {importPreview.fileName} ({importPreview.totalRows} baris)
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-semibold">
+                          +{importPreview.createCount} Baru
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-semibold">
+                          {importPreview.overwriteCount} Ditimpa
+                        </span>
+                        {importPreview.skipCount > 0 && (
+                          <span className="px-2 py-0.5 rounded-md bg-slate-200 text-slate-700 font-semibold">
+                            {importPreview.skipCount} Dilewati
+                          </span>
+                        )}
+                        {importPreview.errorCount > 0 && (
+                          <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 font-semibold">
+                            {importPreview.errorCount} Error
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleClearImport}
+                          disabled={importingMembers}
+                          className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 rounded-lg"
+                        >
+                          Batal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleExecuteMemberImport}
+                          disabled={
+                            importingMembers ||
+                            importPreview.createCount + importPreview.overwriteCount === 0
+                          }
+                          className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold bg-[#1D4ED8] hover:bg-[#1E40AF] disabled:opacity-50 text-white rounded-lg"
+                        >
+                          {importingMembers ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              Mengimport...
+                            </>
+                          ) : (
+                            <>
+                              <UploadCloud className="w-3.5 h-3.5" />
+                              Jalankan Import ({importPreview.createCount + importPreview.overwriteCount})
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="max-h-64 overflow-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead className="bg-white border-b border-slate-200 text-slate-600 sticky top-0">
+                          <tr>
+                            <th className="py-2 px-3">#</th>
+                            <th className="py-2 px-3">Status</th>
+                            <th className="py-2 px-3">Username</th>
+                            <th className="py-2 px-3">Nama Lengkap</th>
+                            <th className="py-2 px-3">Kelas &amp; Divisi</th>
+                            <th className="py-2 px-3">UID NFC / QR</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {importPreview.rows.slice(0, 60).map((row) => (
+                            <tr
+                              key={`${row.rowNumber}-${row.data.username}`}
+                              className={row.action === 'error' ? 'bg-rose-50/50' : ''}
+                            >
+                              <td className="py-2 px-3 text-slate-400 font-mono">{row.rowNumber}</td>
+                              <td className="py-2 px-3 whitespace-nowrap">
+                                {row.action === 'create' && (
+                                  <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-semibold">
+                                    Baru
+                                  </span>
+                                )}
+                                {row.action === 'overwrite' && (
+                                  <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 font-semibold">
+                                    Timpa Data Lama
+                                  </span>
+                                )}
+                                {row.action === 'skip' && (
+                                  <span className="px-2 py-0.5 rounded-md bg-slate-200 text-slate-700 font-semibold">
+                                    Dilewati
+                                  </span>
+                                )}
+                                {row.action === 'error' && (
+                                  <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 font-semibold">
+                                    Error
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-slate-800">
+                                {row.data.username || '-'}
+                                {row.data.role === 'admin' && (
+                                  <span className="ml-1.5 text-[10px] font-sans font-semibold text-[#B91C1C]">
+                                    (Pembina)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-slate-900">
+                                <p className="font-medium">{row.data.full_name || '-'}</p>
+                                {row.errors.length > 0 && (
+                                  <p className="text-[11px] text-rose-700 mt-0.5">
+                                    {row.errors.join(' ')}
+                                  </p>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-slate-600">
+                                {row.data.kelas} · {row.data.division}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-[11px] text-slate-600">
+                                {row.data.nfc_uid || '(auto)'} / {row.data.qr_code_token || '(auto)'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {importPreview.rows.length > 60 && (
+                        <p className="p-2.5 text-center text-[11px] text-slate-500 bg-slate-50 border-t border-slate-200">
+                          Menampilkan 60 baris pertama dari total {importPreview.rows.length} baris.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Create Student Form */}
               <form onSubmit={handleCreateStudent} className="border border-slate-200 rounded-xl p-5 space-y-4">
                 <h3 className="text-sm font-semibold text-slate-900">Tambah Akun Siswa Baru</h3>
@@ -1739,8 +2239,17 @@ export function AdminSection({
                     <option value="Penyiaran">Penyiaran</option>
                   </select>
                 </div>
-                <div className="flex flex-col sm:flex-row gap-3 items-center justify-between">
-                  <div className="w-full sm:flex-1 flex items-center gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-5">
+                    <input
+                      type="tel"
+                      value={parentWhatsapp}
+                      onChange={(e) => setParentWhatsapp(e.target.value)}
+                      placeholder="No. WA Orang Tua (mis. 081234567890)"
+                      className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                    />
+                  </div>
+                  <div className="sm:col-span-4 flex items-center gap-2">
                     <input
                       ref={createNfcInputRef}
                       type="text"
@@ -1755,7 +2264,7 @@ export function AdminSection({
                           }
                         }
                       }}
-                      placeholder="Tap kartu di USB Reader atau ketik UID NFC/RFID (opsional)"
+                      placeholder="UID NFC/RFID (opsional)"
                       className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
                     />
                     <button
@@ -1773,14 +2282,16 @@ export function AdminSection({
                       Tap USB
                     </button>
                   </div>
-                  <button
-                    type="submit"
-                    disabled={creatingStudent || studentMembers.length >= 20}
-                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-sm font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] disabled:opacity-50 rounded-xl whitespace-nowrap"
-                  >
-                    <Plus className="w-4 h-4" />
-                    {studentMembers.length >= 20 ? 'Kuota 20 Siswa Penuh' : 'Buat Akun Siswa'}
-                  </button>
+                  <div className="sm:col-span-3 flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={creatingStudent || studentMembers.length >= 20}
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-sm font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] disabled:opacity-50 rounded-xl whitespace-nowrap"
+                    >
+                      <Plus className="w-4 h-4" />
+                      {studentMembers.length >= 20 ? 'Kuota 20 Siswa Penuh' : 'Buat Akun Siswa'}
+                    </button>
+                  </div>
                 </div>
               </form>
 
@@ -1930,6 +2441,19 @@ export function AdminSection({
                   </div>
 
                   <div>
+                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                      No. WhatsApp Orang Tua / Wali (untuk Laporan Otomatis Absen Masuk, Pulang &amp; Rekap Bulanan)
+                    </label>
+                    <input
+                      type="tel"
+                      value={editParentWhatsapp}
+                      onChange={(e) => setEditParentWhatsapp(e.target.value)}
+                      placeholder="Contoh: 081234567890 atau 6281234567890"
+                      className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-[#1D4ED8]"
+                    />
+                  </div>
+
+                  <div>
                     <label className="block text-[11px] font-medium text-slate-600 mb-1">Bio / Deskripsi Profil Siswa</label>
                     <textarea
                       rows={2}
@@ -1986,6 +2510,7 @@ export function AdminSection({
                     <tr className="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600">
                       <th className="py-3 px-4">Nama &amp; Kelas</th>
                       <th className="py-3 px-4">Username</th>
+                      <th className="py-3 px-4">No. WA Ortu</th>
                       <th className="py-3 px-4">UID NFC/RFID</th>
                       <th className="py-3 px-4 text-right">Aksi</th>
                     </tr>
@@ -2002,6 +2527,13 @@ export function AdminSection({
                           </p>
                         </td>
                         <td className="py-3 px-4 font-mono text-xs text-slate-700">{m.username}</td>
+                        <td className="py-3 px-4 font-mono text-xs">
+                          {m.parent_whatsapp ? (
+                            <span className="text-emerald-700 font-medium">+{m.parent_whatsapp.replace(/^\+/, '')}</span>
+                          ) : (
+                            <span className="text-slate-400">Belum diisi</span>
+                          )}
+                        </td>
                         <td className="py-3 px-4 font-mono text-xs text-slate-700">{m.nfc_uid}</td>
                         <td className="py-3 px-4 text-right whitespace-nowrap">
                           <div className="inline-flex items-center gap-1">

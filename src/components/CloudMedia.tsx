@@ -1,11 +1,11 @@
-import { useEffect, useState, type ImgHTMLAttributes, type ReactNode, type VideoHTMLAttributes } from 'react';
+import { useEffect, useState, type ImgHTMLAttributes, type ReactNode, type SyntheticEvent, type VideoHTMLAttributes } from 'react';
 import {
   getCachedCloudFile,
   isCloudFileUrl,
   resolveCloudFile,
   downloadOrOpenMedia,
 } from '../lib/cloudFiles';
-import { resolveMediaUrl } from '../lib/mediaAssets';
+import { getGoogleDriveImageCandidates, resolveMediaUrl } from '../lib/mediaAssets';
 
 export function useResolvedMedia(rawUrl?: string | null) {
   const [state, setState] = useState<{
@@ -95,13 +95,38 @@ export function useResolvedMedia(rawUrl?: string | null) {
 interface CloudImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src'> {
   src?: string | null;
   fallbackSrc?: string;
+  onImageLoadSuccess?: () => void;
+  onImageLoadFailed?: () => void;
 }
 
-export function CloudImage({ src, fallbackSrc = '', alt = '', className = '', ...rest }: CloudImageProps) {
+export function CloudImage({
+  src,
+  fallbackSrc = '',
+  alt = '',
+  className = '',
+  referrerPolicy = 'no-referrer',
+  onError,
+  onLoad,
+  onImageLoadSuccess,
+  onImageLoadFailed,
+  ...rest
+}: CloudImageProps) {
   const { src: resolvedSrc, loading } = useResolvedMedia(src);
-  const displaySrc = resolvedSrc || fallbackSrc;
+  const driveCandidates = src && !isCloudFileUrl(src) ? getGoogleDriveImageCandidates(src) : [];
+  const [candidateIdx, setCandidateIdx] = useState(0);
 
-  if (!displaySrc) {
+  useEffect(() => {
+    setCandidateIdx(0);
+  }, [src, resolvedSrc]);
+
+  const effectiveCandidate =
+    driveCandidates.length > 0 && candidateIdx < driveCandidates.length
+      ? driveCandidates[candidateIdx]
+      : candidateIdx >= driveCandidates.length && driveCandidates.length > 0
+      ? fallbackSrc
+      : resolvedSrc || fallbackSrc;
+
+  if (!effectiveCandidate) {
     return (
       <div
         className={`bg-slate-100 ${loading ? 'animate-pulse' : ''} ${className}`}
@@ -110,7 +135,31 @@ export function CloudImage({ src, fallbackSrc = '', alt = '', className = '', ..
     );
   }
 
-  return <img src={displaySrc} alt={alt} className={className} {...rest} />;
+  const handleImgError = (e: SyntheticEvent<HTMLImageElement>) => {
+    if (driveCandidates.length > 0 && candidateIdx + 1 < driveCandidates.length) {
+      setCandidateIdx((prev) => prev + 1);
+      return;
+    }
+    onImageLoadFailed?.();
+    onError?.(e);
+  };
+
+  const handleImgLoad = (e: SyntheticEvent<HTMLImageElement>) => {
+    onImageLoadSuccess?.();
+    onLoad?.(e);
+  };
+
+  return (
+    <img
+      src={effectiveCandidate}
+      alt={alt}
+      referrerPolicy={referrerPolicy}
+      onError={handleImgError}
+      onLoad={handleImgLoad}
+      className={className}
+      {...rest}
+    />
+  );
 }
 
 interface CloudVideoProps extends Omit<VideoHTMLAttributes<HTMLVideoElement>, 'src'> {

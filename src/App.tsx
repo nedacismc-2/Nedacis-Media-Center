@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Bell,
   BookOpen,
   Calendar,
   ClipboardCheck,
   CreditCard,
+  ExternalLink,
   Home,
   Image as ImageIcon,
   LogOut,
@@ -26,6 +28,7 @@ import type {
 } from './types';
 import { apiFetch, connectRealtimeSocket, getStoredToken, setStoredToken } from './lib/api';
 import { useFirebase } from './context/FirebaseContext';
+import { FIRESTORE_QUOTA_UPGRADE_URL, subscribeQuotaExceeded } from './lib/firebase';
 import { subscribeUploadedFilesAdmin, type CloudStorageSummary } from './lib/cloudFiles';
 import {
   deterministicNumericId,
@@ -36,6 +39,7 @@ import {
   subscribeLmsTasks,
   subscribeMembersPrivateAdmin,
   subscribeMembersPublic,
+  subscribeMyWorks,
   subscribeNewsArticles,
   subscribeNotificationsFirestore,
   subscribePendingWorksAdmin,
@@ -103,10 +107,11 @@ export default function App() {
   const [cloudNews, setCloudNews] = useState<NewsArticle[] | null>(null);
   const [cloudSchedules, setCloudSchedules] = useState<ScheduleItem[] | null>(null);
   const [cloudPublicMembers, setCloudPublicMembers] = useState<StudentProfile[] | null>(null);
-  const [privateMembersMap, setPrivateMembersMap] = useState<Map<string, { nis: string; nfc_uid: string }>>(
-    () => new Map()
-  );
+  const [privateMembersMap, setPrivateMembersMap] = useState<
+    Map<string, { nis: string; nfc_uid: string; parent_whatsapp: string }>
+  >(() => new Map());
   const [cloudWorks, setCloudWorks] = useState<StudentWork[] | null>(null);
+  const [cloudMyWorks, setCloudMyWorks] = useState<StudentWork[] | null>(null);
   const [cloudAttendance, setCloudAttendance] = useState<AttendanceRecord[] | null>(null);
   const [cloudLmsTasks, setCloudLmsTasks] = useState<LmsTask[] | null>(null);
   const [cloudAdminTasks, setCloudAdminTasks] = useState<AdminLmsTask[] | undefined>(undefined);
@@ -125,7 +130,12 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [pendingRefreshKey, setPendingRefreshKey] = useState(0);
+  const [firestoreQuotaExceeded, setFirestoreQuotaExceeded] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+
+  useEffect(() => {
+    return subscribeQuotaExceeded(setFirestoreQuotaExceeded);
+  }, []);
 
   const bootstrapRef = useRef<{
     siteSettings: SiteBranding;
@@ -160,31 +170,40 @@ export default function App() {
         siteSettings?: SiteBranding;
       }>('/api/bootstrap');
 
-      bootstrapRef.current = {
-        siteSettings: data.siteSettings || DEFAULT_BRANDING,
-        news: data.news,
-        schedules: data.schedules,
-        members: data.members,
-        works: data.works,
-        lmsTasks: data.lmsTasks,
-      };
-      setBootstrapReady(true);
+      const safeNews = Array.isArray(data?.news) ? data.news : [];
+      const safeSchedules = Array.isArray(data?.schedules) ? data.schedules : [];
+      const safeMembers = Array.isArray(data?.members) ? data.members : [];
+      const safeWorks = Array.isArray(data?.works) ? data.works : [];
+      const safeAttendance = Array.isArray(data?.attendance) ? data.attendance : [];
+      const safeLmsTasks = Array.isArray(data?.lmsTasks) ? data.lmsTasks : [];
 
-      if (data.user) {
+      if (safeNews.length > 0 || safeMembers.length > 0 || safeWorks.length > 0 || data?.siteSettings) {
+        bootstrapRef.current = {
+          siteSettings: data.siteSettings || DEFAULT_BRANDING,
+          news: safeNews,
+          schedules: safeSchedules,
+          members: safeMembers,
+          works: safeWorks,
+          lmsTasks: safeLmsTasks,
+        };
+        setBootstrapReady(true);
+      }
+
+      if (data?.user) {
         setCurrentUser(data.user);
       } else if (!localStorage.getItem(PORTAL_MEMBER_STORAGE_KEY)) {
         setCurrentUser(null);
       }
-      setLocalNews(data.news);
-      setLocalSchedules(data.schedules);
-      setLocalMembers(data.members);
-      setLocalWorks(data.works);
-      setLocalAttendance(data.attendance);
-      setLocalLmsTasks(data.lmsTasks || []);
-      if (data.siteSettings) {
+      setLocalNews(safeNews);
+      setLocalSchedules(safeSchedules);
+      setLocalMembers(safeMembers);
+      setLocalWorks(safeWorks);
+      setLocalAttendance(safeAttendance);
+      setLocalLmsTasks(safeLmsTasks);
+      if (data?.siteSettings) {
         setLocalBranding(data.siteSettings);
       }
-      if (!data.user && getStoredToken()) {
+      if (!data?.user && getStoredToken()) {
         setStoredToken(null);
         setToken(null);
       }
@@ -201,9 +220,11 @@ export default function App() {
       return;
     }
     try {
-      const res = await apiFetch<{ tasks: LmsTask[]; totalPoints: number }>('/api/tasks');
-      setLocalLmsTasks(res.tasks);
-      setCurrentUser((prev) => (prev ? { ...prev, lms_points: res.totalPoints } : prev));
+      const res = await apiFetch<{ tasks?: LmsTask[]; totalPoints?: number }>('/api/tasks');
+      setLocalLmsTasks(Array.isArray(res?.tasks) ? res.tasks : []);
+      if (typeof res?.totalPoints === 'number') {
+        setCurrentUser((prev) => (prev ? { ...prev, lms_points: res.totalPoints } : prev));
+      }
     } catch {
       // ignore
     }
@@ -215,8 +236,8 @@ export default function App() {
       return;
     }
     try {
-      const res = await apiFetch<{ notifications: NotificationItem[] }>('/api/notifications');
-      setLocalNotifications(res.notifications);
+      const res = await apiFetch<{ notifications?: NotificationItem[] }>('/api/notifications');
+      setLocalNotifications(Array.isArray(res?.notifications) ? res.notifications : []);
     } catch {
       setLocalNotifications([]);
     }
@@ -228,8 +249,8 @@ export default function App() {
       return;
     }
     try {
-      const res = await apiFetch<{ works: StudentWork[] }>('/api/admin/works/pending');
-      setLocalPendingWorksCount(res.works.length);
+      const res = await apiFetch<{ works?: StudentWork[] }>('/api/admin/works/pending');
+      setLocalPendingWorksCount(Array.isArray(res?.works) ? res.works.length : 0);
     } catch {
       setLocalPendingWorksCount(0);
     }
@@ -281,20 +302,49 @@ export default function App() {
   const schedules = cloudSeeded && cloudSchedules !== null ? cloudSchedules : localSchedules;
   const works = cloudSeeded && cloudWorks !== null ? cloudWorks : localWorks;
 
-  const rawMembers = cloudSeeded && cloudPublicMembers !== null ? cloudPublicMembers : localMembers;
+  const membersAllWorks = useMemo(() => {
+    const base = Array.isArray(works) ? works : [];
+    const mine = Array.isArray(cloudMyWorks) ? cloudMyWorks : [];
+    if (mine.length === 0) return base;
+    const map = new Map<string, StudentWork>();
+    for (const w of base) {
+      map.set(w.firestoreId || String(w.id), w);
+    }
+    for (const w of mine) {
+      map.set(w.firestoreId || String(w.id), w);
+    }
+    return Array.from(map.values()).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  }, [works, cloudMyWorks]);
+
+  const rawMembers = useMemo(
+    () => (cloudSeeded && Array.isArray(cloudPublicMembers) ? cloudPublicMembers : Array.isArray(localMembers) ? localMembers : []),
+    [cloudSeeded, cloudPublicMembers, localMembers]
+  );
+  const isAdminSessionHint = currentUser?.role === 'admin' || isFirebaseAdmin;
   const members = useMemo(() => {
-    if (privateMembersMap.size === 0) return rawMembers;
-    return rawMembers.map((m) => {
+    const safeLocal = Array.isArray(localMembers) ? localMembers : [];
+    const safeRaw = Array.isArray(rawMembers) ? rawMembers : [];
+    const localByUsername = new Map(
+      safeLocal
+        .filter((lm) => Boolean(lm?.username))
+        .map((lm) => [lm.username.trim().toLowerCase(), lm])
+    );
+    if (privateMembersMap.size === 0 && !isAdminSessionHint) return safeRaw;
+    return safeRaw.map((m) => {
       const key = m.firestoreId || sanitizeDocId(`member_${m.username}`);
       const priv = privateMembersMap.get(key);
-      if (!priv) return m;
+      const localMatch = isAdminSessionHint
+        ? localByUsername.get((m.username || '').trim().toLowerCase())
+        : undefined;
+      if (!priv && !localMatch) return m;
       return {
         ...m,
-        nis: priv.nis || m.nis,
-        nfc_uid: priv.nfc_uid || m.nfc_uid,
+        nis: priv?.nis || localMatch?.nis || m.nis,
+        nfc_uid: priv?.nfc_uid || localMatch?.nfc_uid || m.nfc_uid,
+        parent_whatsapp: priv?.parent_whatsapp || localMatch?.parent_whatsapp || m.parent_whatsapp || '',
       };
     });
-  }, [rawMembers, privateMembersMap]);
+  }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint]);
 
   // Resolve member identity cleanly for both Username+ID sessions and Google Auth sessions
   const resolvedMember = useMemo(() => {
@@ -346,8 +396,9 @@ export default function App() {
     }
   }, [currentUser, members]);
 
-  // Public Cloud Firestore real-time subscriptions (syncs across all devices/browsers)
+  // Site branding subscription (does not depend on admin role; wait for auth ready to avoid double read)
   useEffect(() => {
+    if (!firebaseAuthReady) return;
     const unsubSettings = subscribeSiteSettings((settings) => {
       if (settings) {
         setCloudSeeded(true);
@@ -358,7 +409,14 @@ export default function App() {
         setCloudBranding(null);
       }
     });
+    return () => {
+      unsubSettings();
+    };
+  }, [firebaseAuthReady]);
 
+  // Public Cloud Firestore real-time subscriptions (wait for firebaseAuthReady to avoid double-subscribing on admin login)
+  useEffect(() => {
+    if (!firebaseAuthReady) return;
     const unsubNews = subscribeNewsArticles(isFirebaseAdmin, (articles) => {
       setCloudNews(articles);
     });
@@ -376,16 +434,16 @@ export default function App() {
     });
 
     return () => {
-      unsubSettings();
       unsubNews();
       unsubSchedules();
       unsubMembers();
       unsubWorks();
     };
-  }, [isFirebaseAdmin]);
+  }, [firebaseAuthReady, isFirebaseAdmin]);
 
   // Student, Pembina, and Google Auth real-time Cloud Firestore listeners (without requiring Google Sign-In)
   useEffect(() => {
+    if (!firebaseAuthReady) return;
     if (firebaseUser?.uid || effectiveMemberDocId) {
       const uid = firebaseUser?.uid || '';
       const unsubAtt = subscribeAttendanceRecords(
@@ -416,10 +474,15 @@ export default function App() {
         effectiveMemberDocId
       );
 
+      const unsubMyWorks = subscribeMyWorks(uid, effectiveMemberDocId, (myList) => {
+        setCloudMyWorks(myList);
+      });
+
       return () => {
         unsubAtt();
         unsubLms();
         unsubNotifs();
+        unsubMyWorks();
       };
     }
 
@@ -427,11 +490,13 @@ export default function App() {
     setCloudAdminTasks(undefined);
     setCloudNotifications(null);
     setCloudLmsTasks(null);
+    setCloudMyWorks(null);
     return undefined;
-  }, [firebaseUser?.uid, effectiveIsAdmin, effectiveMemberDocId]);
+  }, [firebaseAuthReady, firebaseUser?.uid, effectiveIsAdmin, effectiveMemberDocId]);
 
   // Admin & Pembina Cloud Firestore listeners (Pending Works, Blocked Words, Storage Monitor, and PII when Google Admin)
   useEffect(() => {
+    if (!firebaseAuthReady) return;
     if (!effectiveIsAdmin) {
       setPrivateMembersMap(new Map());
       setCloudPendingWorks(undefined);
@@ -491,11 +556,11 @@ export default function App() {
     return () => {
       unsubs.forEach((u) => u());
     };
-  }, [firebaseUser?.uid, isFirebaseAdmin, effectiveIsAdmin, showToast]);
+  }, [firebaseAuthReady, firebaseUser?.uid, isFirebaseAdmin, effectiveIsAdmin, showToast]);
 
   // Auto-seed Cloud Firestore & ensure cross-device member auth hashes when Admin signs in with Google
   useEffect(() => {
-    if (!firebaseAuthReady || !isFirebaseAdmin) return;
+    if (!firebaseAuthReady || !isFirebaseAdmin || firestoreQuotaExceeded) return;
     if (cloudSeeded) {
       syncMemberAuthHashesAdmin().catch(() => {});
       return;
@@ -516,7 +581,7 @@ export default function App() {
       .catch(() => {
         autoSeedAttemptedRef.current = false;
       });
-  }, [firebaseAuthReady, isFirebaseAdmin, cloudSeeded, bootstrapReady, showToast]);
+  }, [firebaseAuthReady, isFirebaseAdmin, firestoreQuotaExceeded, cloudSeeded, bootstrapReady, showToast]);
 
   // Synthesize effectiveUser from local/portal session OR authenticated Firebase Google session
   const effectiveUser = useMemo<StudentProfile | null>(() => {
@@ -525,15 +590,29 @@ export default function App() {
       0
     );
     if (currentUser) {
+      const liveMember = members.find(
+        (m) => m.username.trim().toLowerCase() === currentUser.username.trim().toLowerCase()
+      );
+      const liveAvatar = liveMember?.avatar_url || '';
+      const currAvatar = currentUser.avatar_url || '';
+      const chosenAvatar =
+        (liveAvatar.startsWith('cloudfile://') ? liveAvatar : '') ||
+        (currAvatar.startsWith('cloudfile://') ? currAvatar : '') ||
+        liveAvatar ||
+        currAvatar ||
+        (cloudPhotoUrl.startsWith('cloudfile://') || cloudPhotoUrl.startsWith('/uploads/')
+          ? cloudPhotoUrl
+          : '') ||
+        '';
       return {
         ...currentUser,
+        firestoreId: liveMember?.firestoreId || currentUser.firestoreId,
+        bio: liveMember?.bio ?? currentUser.bio,
+        division: liveMember?.division || currentUser.division,
+        attendance_count: liveMember?.attendance_count ?? currentUser.attendance_count,
+        works_count: liveMember?.works_count ?? currentUser.works_count,
         role: isFirebaseAdmin ? 'admin' : currentUser.role,
-        avatar_url:
-          currentUser.avatar_url ||
-          (cloudPhotoUrl.startsWith('cloudfile://') || cloudPhotoUrl.startsWith('/uploads/')
-            ? cloudPhotoUrl
-            : '') ||
-          '',
+        avatar_url: chosenAvatar,
         lms_points: (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudPoints : currentUser.lms_points,
       };
     }
@@ -569,7 +648,7 @@ export default function App() {
       };
     }
     return null;
-  }, [currentUser, firebaseUser, isFirebaseAdmin, cloudPhotoUrl, resolvedMember, lmsTasks, cloudLmsTasks]);
+  }, [currentUser, firebaseUser, isFirebaseAdmin, cloudPhotoUrl, resolvedMember, members, lmsTasks, cloudLmsTasks]);
 
   // Hash routing for QR Code profile deep-linking (#profil/username)
   useEffect(() => {
@@ -596,7 +675,9 @@ export default function App() {
           setLatestAttendanceEvent(rec);
           setLocalAttendance((prev) => {
             const existsIdx = prev.findIndex(
-              (r) => r.user_id === rec.user_id && r.attendance_date === rec.attendance_date
+              (r) =>
+                r.attendance_date === rec.attendance_date &&
+                (r.username === rec.username || (rec.user_id > 0 && r.user_id === rec.user_id))
             );
             if (existsIdx >= 0) {
               return prev.map((r, i) => (i === existsIdx ? rec : r));
@@ -669,11 +750,23 @@ export default function App() {
           setLocalBranding(event.payload);
         } else if (event.type === 'member:updated') {
           const { id, avatar_url } = event.payload;
-          setLocalMembers((prev) => prev.map((m) => (m.id === id ? { ...m, avatar_url } : m)));
-          setLocalWorks((prev) =>
-            prev.map((w) => (w.user_id === id ? { ...w, author_avatar_url: avatar_url } : w))
+          const keepExistingIfCloud = (existingUrl?: string) => {
+            if (existingUrl?.startsWith('cloudfile://') && !avatar_url.startsWith('cloudfile://')) {
+              return existingUrl;
+            }
+            return avatar_url;
+          };
+          setLocalMembers((prev) =>
+            prev.map((m) => (m.id === id ? { ...m, avatar_url: keepExistingIfCloud(m.avatar_url) } : m))
           );
-          setCurrentUser((prev) => (prev && prev.id === id ? { ...prev, avatar_url } : prev));
+          setLocalWorks((prev) =>
+            prev.map((w) =>
+              w.user_id === id ? { ...w, author_avatar_url: keepExistingIfCloud(w.author_avatar_url) } : w
+            )
+          );
+          setCurrentUser((prev) =>
+            prev && prev.id === id ? { ...prev, avatar_url: keepExistingIfCloud(prev.avatar_url) } : prev
+          );
         } else if (event.type === 'member:points_updated') {
           const { id, lms_points } = event.payload;
           setLocalMembers((prev) => prev.map((m) => (m.id === id ? { ...m, lms_points } : m)));
@@ -878,6 +971,39 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10">
+        {firestoreQuotaExceeded && (
+          <div className="mb-6 p-4 rounded-2xl border border-amber-300 bg-amber-50 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+              <div className="text-xs sm:text-sm space-y-1">
+                <p className="font-semibold">
+                  Batas kuota baca harian Firebase Firestore (paket Spark gratis) telah tercapai.
+                </p>
+                <p className="text-amber-900">
+                  Kuota akan direset otomatis keesokan harinya. Portal tetap berjalan menggunakan data lokal yang tersedia. Detail batas kuota paket Spark dapat dilihat pada{' '}
+                  <a
+                    href="https://firebase.google.com/pricing#cloud-firestore"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline font-medium"
+                  >
+                    dokumentasi harga Cloud Firestore
+                  </a>
+                  .
+                </p>
+              </div>
+            </div>
+            <a
+              href={FIRESTORE_QUOTA_UPGRADE_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-amber-700 hover:bg-amber-800 text-white rounded-xl whitespace-nowrap shrink-0 self-start sm:self-center"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Upgrade di Firebase Console
+            </a>
+          </div>
+        )}
         {loading ? (
           <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center text-sm text-slate-500">
             Memuat portal Nedacis Media Center SMPN 2 Ciamis...
@@ -905,15 +1031,26 @@ export default function App() {
             {activeTab === 'galeri' && (
               <GallerySection
                 works={works}
+                members={members}
                 currentUser={effectiveUser}
+                cloudSeeded={cloudSeeded}
                 selectedWork={selectedWork}
                 onSelectWork={setSelectedWork}
                 onOpenMemberProfile={openMemberProfile}
                 onRequireLogin={() => setLoginOpen(true)}
-                onWorkCreated={(w) =>
-                  setLocalWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]))
-                }
-                onWorkDeleted={(id) => setLocalWorks((prev) => prev.filter((x) => x.id !== id))}
+                onWorkCreated={(w) => {
+                  if (w.approval_status === 'approved') {
+                    setLocalWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]));
+                  } else {
+                    setCloudMyWorks((prev) =>
+                      prev ? (prev.some((x) => x.firestoreId === w.firestoreId) ? prev : [w, ...prev]) : [w]
+                    );
+                  }
+                }}
+                onWorkDeleted={(id) => {
+                  setLocalWorks((prev) => prev.filter((x) => x.id !== id));
+                  setCloudMyWorks((prev) => (prev ? prev.filter((x) => x.id !== id) : prev));
+                }}
                 onWorkPatch={(id, patch) => {
                   setLocalWorks((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
                   setSelectedWork((prev) => (prev?.id === id ? { ...prev, ...patch } : prev));
@@ -925,9 +1062,10 @@ export default function App() {
             {activeTab === 'anggota' && (
               <MembersSection
                 members={members}
-                allWorks={works}
+                allWorks={membersAllWorks}
                 allAttendance={attendanceRecords}
                 currentUser={effectiveUser}
+                cloudSeeded={cloudSeeded}
                 lmsTasks={lmsTasks}
                 selectedUsername={selectedUsername}
                 onSelectUsername={(uname) => {
@@ -947,12 +1085,43 @@ export default function App() {
                 onUserUpdated={(updatedUser) => {
                   setCurrentUser(updatedUser);
                   setLocalMembers((prev) =>
-                    prev.map((m) => (m.id === updatedUser.id ? { ...m, avatar_url: updatedUser.avatar_url } : m))
+                    prev.map((m) =>
+                      m.username.toLowerCase() === updatedUser.username.toLowerCase()
+                        ? {
+                            ...m,
+                            avatar_url: updatedUser.avatar_url,
+                            bio: updatedUser.bio,
+                            division: updatedUser.division,
+                          }
+                        : m
+                    )
+                  );
+                  setCloudPublicMembers((prev) =>
+                    prev
+                      ? prev.map((m) =>
+                          m.username.toLowerCase() === updatedUser.username.toLowerCase()
+                            ? {
+                                ...m,
+                                avatar_url: updatedUser.avatar_url,
+                                bio: updatedUser.bio,
+                                division: updatedUser.division,
+                              }
+                            : m
+                        )
+                      : prev
                   );
                 }}
-                onWorkApprovedOrAdminCreated={(w) =>
-                  setLocalWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]))
-                }
+                onWorkApprovedOrAdminCreated={(w) => {
+                  setLocalWorks((prev) => (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]));
+                  setCloudMyWorks((prev) =>
+                    prev ? (prev.some((x) => x.id === w.id) ? prev : [w, ...prev]) : [w]
+                  );
+                }}
+                onWorkPendingCreated={(w) => {
+                  setCloudMyWorks((prev) =>
+                    prev ? (prev.some((x) => x.firestoreId === w.firestoreId) ? prev : [w, ...prev]) : [w]
+                  );
+                }}
                 onToast={showToast}
                 latestAttendanceEvent={latestAttendanceEvent}
               />
@@ -974,6 +1143,7 @@ export default function App() {
               <LmsTasksSection
                 currentUser={effectiveUser}
                 tasks={lmsTasks}
+                cloudSeeded={cloudSeeded}
                 initialSelectedTaskId={selectedTaskId}
                 onTaskUpdated={(updatedTask, newTotalPoints) => {
                   setLocalLmsTasks((prev) =>
@@ -1000,16 +1170,21 @@ export default function App() {
                 members={members}
                 attendanceRecords={attendanceRecords}
                 currentUser={effectiveUser}
+                isFirebaseAdmin={isFirebaseAdmin}
                 wsConnected={wsConnected || Boolean(firebaseUser || currentUser)}
                 onAttendanceRecorded={(rec) => {
                   setLatestAttendanceEvent(rec);
-                  setLocalAttendance((prev) => {
+                  const upsertRec = (prev: AttendanceRecord[]) => {
                     const idx = prev.findIndex(
-                      (r) => r.user_id === rec.user_id && r.attendance_date === rec.attendance_date
+                      (r) =>
+                        r.attendance_date === rec.attendance_date &&
+                        (r.username === rec.username || (rec.user_id > 0 && r.user_id === rec.user_id))
                     );
                     if (idx >= 0) return prev.map((r, i) => (i === idx ? rec : r));
                     return [rec, ...prev];
-                  });
+                  };
+                  setLocalAttendance(upsertRec);
+                  setCloudAttendance((prev) => (prev ? upsertRec(prev) : prev));
                 }}
                 onOpenMemberProfile={openMemberProfile}
                 onToast={showToast}

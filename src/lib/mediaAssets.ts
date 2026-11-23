@@ -12,8 +12,56 @@ const ASSET_MAP: Record<string, string> = {
   'asset:work_editing': workEditing,
 };
 
+export function extractGoogleDriveFileId(rawUrl: string): string | null {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return null;
+
+  // https://drive.google.com/file/d/<ID>/view?... or /file/u/0/d/<ID>/view
+  const filePathMatch = trimmed.match(/drive\.google\.com\/(?:file\/(?:u\/\d+\/)?d|thumbnail|open)\/?([a-zA-Z0-9_-]{15,})/i);
+  if (filePathMatch?.[1]) return filePathMatch[1];
+
+  // https://drive.google.com/open?id=<ID> or /uc?id=<ID> or /thumbnail?id=<ID> or drive.usercontent.google.com/download?id=<ID>
+  if (/drive\.google\.com|drive\.usercontent\.google\.com/i.test(trimmed)) {
+    const idParamMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]{15,})/i);
+    if (idParamMatch?.[1]) return idParamMatch[1];
+  }
+
+  // https://lh3.googleusercontent.com/d/<ID>=w1600 or /d/<ID>
+  const lh3Match = trimmed.match(/lh\d\.googleusercontent\.com\/d\/([a-zA-Z0-9_-]{15,})/i);
+  if (lh3Match?.[1]) return lh3Match[1];
+
+  return null;
+}
+
+export function getGoogleDriveImageCandidates(rawUrl: string): string[] {
+  const fileId = extractGoogleDriveFileId(rawUrl);
+  if (!fileId) return [];
+  return [
+    `https://lh3.googleusercontent.com/d/${fileId}=w1600`,
+    `https://drive.google.com/thumbnail?id=${fileId}&sz=w1600`,
+    `https://drive.google.com/uc?export=view&id=${fileId}`,
+  ];
+}
+
+export function normalizeWorkMediaUrl(rawUrl: string, mediaType: 'image' | 'video' = 'image'): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+  const driveId = extractGoogleDriveFileId(trimmed);
+  if (driveId) {
+    return mediaType === 'video'
+      ? `https://drive.google.com/uc?export=download&id=${driveId}`
+      : `https://lh3.googleusercontent.com/d/${driveId}=w1600`;
+  }
+  return trimmed;
+}
+
 export function resolveMediaUrl(url: string): string {
+  if (!url) return '';
   if (ASSET_MAP[url]) return ASSET_MAP[url];
+  const driveId = extractGoogleDriveFileId(url);
+  if (driveId) {
+    return `https://lh3.googleusercontent.com/d/${driveId}=w1600`;
+  }
   return url;
 }
 
