@@ -664,7 +664,15 @@ export function AttendanceHub({
       const monthRecs = attendanceRecords.filter((r) => r.attendance_date.startsWith(reportMonth));
       const uniqueDates = new Set(monthRecs.map((r) => r.attendance_date));
       const totalSessions = Math.max(uniqueDates.size, 1);
-      const students = members.filter((m) => m.role === 'student');
+      const studentByUsername = new Map<string, StudentProfile>();
+      for (const m of members) {
+        if (m.role !== 'student') continue;
+        const key = m.username.trim().toLowerCase();
+        if (key && !studentByUsername.has(key)) {
+          studentByUsername.set(key, m);
+        }
+      }
+      const students = Array.from(studentByUsername.values());
       const rows: MonthlyReportRow[] = students.map((st) => {
         const recs = monthRecs.filter(
           (r) =>
@@ -1243,7 +1251,7 @@ export function AttendanceHub({
                     const hasIn = Boolean(todayRec?.check_in_time);
                     return (
                       <button
-                        key={m.id}
+                        key={m.firestoreId || `${m.id}-${m.username}`}
                         type="button"
                         onClick={() => submitScan(cardCode, 'NFC/RFID')}
                         className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-left bg-slate-50 hover:bg-amber-50 border border-slate-200 hover:border-amber-300 rounded-xl transition-colors min-h-[44px]"
@@ -1545,7 +1553,7 @@ export function AttendanceHub({
             <div className="divide-y divide-slate-100 max-h-[460px] overflow-y-auto">
               {members.map((m) => (
                 <button
-                  key={m.id}
+                  key={m.firestoreId || `${m.id}-${m.username}`}
                   type="button"
                   onClick={() => handleDecodedQr(m.qr_code_token)}
                   className="w-full py-3 px-2 flex items-center justify-between gap-2 text-left hover:bg-slate-50 rounded-lg transition-colors"
@@ -1656,7 +1664,7 @@ export function AttendanceHub({
                     const waHref = row.parent_whatsapp ? buildWhatsappUrl(row.parent_whatsapp, waMsg) : '';
 
                     return (
-                      <tr key={row.user_id} className="hover:bg-slate-50">
+                      <tr key={`${row.user_id}-${row.username}`} className="hover:bg-slate-50">
                         <td className="py-3 pr-3 font-mono text-xs text-slate-500 tabular-nums">{row.nis}</td>
                         <td className="py-3 px-3 font-medium text-slate-900">
                           <button

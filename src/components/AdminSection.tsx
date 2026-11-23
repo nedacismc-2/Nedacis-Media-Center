@@ -2536,7 +2536,7 @@ export function AdminSection({
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {members.map((m) => (
-                      <tr key={m.id} className={editingId === m.id ? 'bg-blue-50/40' : ''}>
+                      <tr key={m.firestoreId || `${m.id}-${m.username}`} className={editingId === m.id ? 'bg-blue-50/40' : ''}>
                         <td className="py-3 px-4">
                           <p className="font-medium text-slate-900">{m.full_name}</p>
                           <p className={`text-xs ${m.role === 'admin' ? 'font-medium text-[#B91C1C]' : 'text-slate-500'}`}>

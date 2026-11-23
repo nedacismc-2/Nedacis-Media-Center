@@ -385,11 +385,21 @@ export function subscribeMembersPublic(
           lms_points: Number(d.lmsPoints || 0),
         };
       });
-      list.sort((a, b) => {
+      const byUsername = new Map<string, StudentProfile>();
+      for (const item of list) {
+        const unameKey = item.username.trim().toLowerCase();
+        const canonicalDocId = sanitizeDocId(`member_${unameKey}`);
+        const prev = byUsername.get(unameKey);
+        if (!prev || (item.firestoreId === canonicalDocId && prev.firestoreId !== canonicalDocId)) {
+          byUsername.set(unameKey, item);
+        }
+      }
+      const dedupedList = Array.from(byUsername.values());
+      dedupedList.sort((a, b) => {
         if (a.role !== b.role) return a.role === 'admin' ? -1 : 1;
         return a.full_name.localeCompare(b.full_name);
       });
-      onData(list);
+      onData(dedupedList);
     },
     (error) => handleSnapshotError(error, OperationType.LIST, path)
   );
@@ -2576,8 +2586,18 @@ export async function syncMissingMembersToFirestore(localMembers: StudentProfile
       getDocs(collection(db, 'members_private')),
     ]);
     const pubMap = new Map<string, Record<string, unknown>>();
+    const pubByUsername = new Map<string, { docId: string; data: Record<string, unknown> }>();
     for (const d of pubSnap.docs) {
-      pubMap.set(d.id, d.data() as Record<string, unknown>);
+      const data = d.data() as Record<string, unknown>;
+      pubMap.set(d.id, data);
+      const unameKey = String(data.username || '').trim().toLowerCase();
+      if (unameKey) {
+        const canonicalId = sanitizeDocId(`member_${unameKey}`);
+        const prev = pubByUsername.get(unameKey);
+        if (!prev || (d.id === canonicalId && prev.docId !== canonicalId)) {
+          pubByUsername.set(unameKey, { docId: d.id, data });
+        }
+      }
     }
     const privSet = new Set(privSnap.docs.map((d) => d.id));
 
@@ -2587,8 +2607,11 @@ export async function syncMissingMembersToFirestore(localMembers: StudentProfile
 
     for (const m of localMembers) {
       if (!m?.username) continue;
-      const memberId = sanitizeDocId(`member_${m.username}`);
-      const existingPub = pubMap.get(memberId);
+      const unameKey = m.username.trim().toLowerCase();
+      const canonicalMemberId = sanitizeDocId(`member_${unameKey}`);
+      const byNameMatch = pubByUsername.get(unameKey);
+      const memberId = byNameMatch?.docId || canonicalMemberId;
+      const existingPub = pubMap.get(memberId) || byNameMatch?.data;
       const defaultPass =
         m.username === 'admin' ? 'adminmmc' : m.role === 'admin' ? 'pembina123' : 'siswa123';
       const rawNfcUid = clampStr(m.nfc_uid || `04NMC${m.id}`, 64);

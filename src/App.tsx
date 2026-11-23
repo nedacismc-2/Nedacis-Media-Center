@@ -337,8 +337,20 @@ export default function App() {
         .filter((lm) => Boolean(lm?.username))
         .map((lm) => [lm.username.trim().toLowerCase(), lm])
     );
+
+    const dedupedRawMap = new Map<string, StudentProfile>();
+    for (const m of safeRaw) {
+      const unameKey = (m.username || '').trim().toLowerCase();
+      if (!unameKey) continue;
+      const existing = dedupedRawMap.get(unameKey);
+      const canonicalId = sanitizeDocId(`member_${unameKey}`);
+      if (!existing || (m.firestoreId === canonicalId && existing.firestoreId !== canonicalId)) {
+        dedupedRawMap.set(unameKey, m);
+      }
+    }
+
     const seenUsernames = new Set<string>();
-    const merged = safeRaw.map((m) => {
+    const merged: StudentProfile[] = Array.from(dedupedRawMap.values()).map((m) => {
       const unameKey = (m.username || '').trim().toLowerCase();
       seenUsernames.add(unameKey);
       const key = m.firestoreId || sanitizeDocId(`member_${m.username}`);
@@ -367,11 +379,25 @@ export default function App() {
       for (const lm of safeLocal) {
         const unameKey = (lm.username || '').trim().toLowerCase();
         if (unameKey && !seenUsernames.has(unameKey)) {
+          seenUsernames.add(unameKey);
           merged.push(lm);
         }
       }
     }
-    return merged;
+
+    const usedIds = new Set<number>();
+    return merged.map((m) => {
+      const unameKey = (m.username || '').trim().toLowerCase();
+      let candidateId = Number(m.id);
+      if (!Number.isFinite(candidateId) || candidateId <= 0 || usedIds.has(candidateId)) {
+        candidateId = deterministicNumericId(m.firestoreId || `member_${unameKey}`);
+        while (usedIds.has(candidateId)) {
+          candidateId += 1;
+        }
+      }
+      usedIds.add(candidateId);
+      return candidateId === m.id ? m : { ...m, id: candidateId };
+    });
   }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint, isFirebaseAdmin, cloudSeeded]);
 
   // Resolve member identity cleanly for both Username+ID sessions and Google Auth sessions

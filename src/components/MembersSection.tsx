@@ -1286,7 +1286,7 @@ export function MembersSection({
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {filteredMembers.map((member) => (
           <button
-            key={member.id}
+            key={member.firestoreId || `${member.id}-${member.username}`}
             type="button"
             onClick={() => onSelectUsername(member.username)}
             className="text-left bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-6 transition-colors flex flex-col justify-between gap-5 group"
