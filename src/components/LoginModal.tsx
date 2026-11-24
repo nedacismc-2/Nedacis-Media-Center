@@ -68,8 +68,32 @@ export function LoginModal({
       }
 
       if (localMatched) {
+        const unameKey = localMatched.user.username.trim().toLowerCase();
+        const cloudMatch =
+          members.length > 0
+            ? members.find((m) => m.username.trim().toLowerCase() === unameKey)
+            : undefined;
+        if (members.length > 0 && !cloudMatch) {
+          setStoredToken(null);
+          throw new Error('Akun tidak ditemukan atau telah dihapus oleh Admin.');
+        }
+        const mergedUser: StudentProfile = cloudMatch
+          ? {
+              ...localMatched.user,
+              firestoreId: cloudMatch.firestoreId || localMatched.user.firestoreId,
+              full_name: cloudMatch.full_name || localMatched.user.full_name,
+              role: cloudMatch.role || localMatched.user.role,
+              division: cloudMatch.division || localMatched.user.division,
+              kelas: cloudMatch.kelas || localMatched.user.kelas,
+              bio: cloudMatch.bio ?? localMatched.user.bio,
+              qr_code_token: cloudMatch.qr_code_token || localMatched.user.qr_code_token,
+              avatar_color: cloudMatch.avatar_color || localMatched.user.avatar_color,
+              avatar_url: cloudMatch.avatar_url || localMatched.user.avatar_url,
+              show_in_members: cloudMatch.show_in_members ?? localMatched.user.show_in_members,
+            }
+          : localMatched.user;
         setStoredToken(localMatched.token);
-        onLoginSuccess(localMatched.user, localMatched.token);
+        onLoginSuccess(mergedUser, localMatched.token);
         onClose();
         return;
       }

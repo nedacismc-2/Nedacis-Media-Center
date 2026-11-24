@@ -2575,7 +2575,10 @@ export async function syncMemberAuthHashesAdmin(force = false): Promise<void> {
   }
 }
 
-export async function syncMissingMembersToFirestore(localMembers: StudentProfile[]): Promise<number> {
+export async function syncMissingMembersToFirestore(
+  localMembers: StudentProfile[],
+  options?: { adminsOnly?: boolean }
+): Promise<number> {
   const uid = auth.currentUser?.uid;
   if (!uid || isFirestoreQuotaExceeded() || !Array.isArray(localMembers) || localMembers.length === 0) {
     return 0;
@@ -2607,6 +2610,7 @@ export async function syncMissingMembersToFirestore(localMembers: StudentProfile
 
     for (const m of localMembers) {
       if (!m?.username) continue;
+      if (options?.adminsOnly && m.role !== 'admin') continue;
       const unameKey = m.username.trim().toLowerCase();
       const canonicalMemberId = sanitizeDocId(`member_${unameKey}`);
       const byNameMatch = pubByUsername.get(unameKey);
@@ -2661,12 +2665,10 @@ export async function syncMissingMembersToFirestore(localMembers: StudentProfile
         }
         syncedCount++;
       } else {
-        const existingRole = existingPub.role === 'admin' ? 'admin' : 'student';
-        const desiredRole = m.role === 'admin' ? 'admin' : 'student';
         const existingHashes = Array.isArray(existingPub.authHashes)
           ? (existingPub.authHashes as string[])
           : [];
-        if (existingRole !== desiredRole || existingHashes.length === 0) {
+        if (existingHashes.length === 0) {
           const authHashes = await buildMemberAuthHashes({
             qrCodeToken: String(existingPub.qrCodeToken || m.qr_code_token || `NMC-${m.id}`),
             nis: m.nis || `NIS-${m.id}`,
@@ -2675,10 +2677,8 @@ export async function syncMissingMembersToFirestore(localMembers: StudentProfile
           });
           const nfcHash = rawNfcUid ? await buildNfcHash(rawNfcUid) : '';
           batch.update(doc(db, 'members_public', memberId), {
-            role: desiredRole,
-            showInMembers: Boolean(m.show_in_members ?? (desiredRole === 'student' ? 1 : 0)),
             authHashes,
-            ...(nfcHash ? { nfcHash } : {}),
+            ...(nfcHash && !existingPub.nfcHash ? { nfcHash } : {}),
             updatedAt: serverTimestamp(),
           });
           opCount++;

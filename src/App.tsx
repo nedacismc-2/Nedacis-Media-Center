@@ -63,6 +63,7 @@ import { NotificationsDrawer } from './components/NotificationsDrawer';
 import { AdminSection } from './components/AdminSection';
 import { NmcLogo } from './components/NmcLogo';
 import { SocialSilhouetteIcon } from './components/SocialSilhouetteIcon';
+import { WelcomeScreen } from './components/WelcomeScreen';
 
 type MainTab = 'beranda' | 'galeri' | 'anggota' | 'jadwal' | 'tugas' | 'absensi' | 'persetujuan' | 'admin';
 
@@ -130,6 +131,9 @@ export default function App() {
   const [latestAttendanceEvent, setLatestAttendanceEvent] = useState<AttendanceRecord | null>(null);
 
   const [loginOpen, setLoginOpen] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(() =>
+    typeof window !== 'undefined' ? !window.location.hash.startsWith('#profil/') : true
+  );
   const [notifOpen, setNotifOpen] = useState(false);
   const [pendingRefreshKey, setPendingRefreshKey] = useState(0);
   const [firestoreQuotaExceeded, setFirestoreQuotaExceeded] = useState(false);
@@ -150,6 +154,8 @@ export default function App() {
   const autoSeedAttemptedRef = useRef(false);
   const lmsMissingSyncAttemptedRef = useRef(false);
   const missingMembersSyncSigRef = useRef('');
+  const cloudToLocalSyncSigRef = useRef('');
+  const firebaseTokenExchangeAttemptedRef = useRef(false);
   const deletedAttendanceKeysRef = useRef<Set<string>>(new Set());
   const lastStorageAlertStatusRef = useRef<'ok' | 'warning' | 'full'>('ok');
   const [bootstrapReady, setBootstrapReady] = useState(false);
@@ -350,6 +356,7 @@ export default function App() {
     }
 
     const seenUsernames = new Set<string>();
+    const cloudAuthoritative = cloudSeeded && Array.isArray(cloudPublicMembers) && cloudPublicMembers.length > 0;
     const merged: StudentProfile[] = Array.from(dedupedRawMap.values()).map((m) => {
       const unameKey = (m.username || '').trim().toLowerCase();
       seenUsernames.add(unameKey);
@@ -362,20 +369,9 @@ export default function App() {
         nis: priv?.nis || localMatch?.nis || m.nis,
         nfc_uid: priv?.nfc_uid || localMatch?.nfc_uid || m.nfc_uid,
         parent_whatsapp: priv?.parent_whatsapp || localMatch?.parent_whatsapp || m.parent_whatsapp || '',
-        ...(localMatch && !isFirebaseAdmin
-          ? {
-              full_name: localMatch.full_name || m.full_name,
-              kelas: localMatch.kelas || m.kelas,
-              division: localMatch.division || m.division,
-              role: localMatch.role || m.role,
-              qr_code_token: localMatch.qr_code_token || m.qr_code_token,
-              bio: localMatch.bio ?? m.bio,
-              avatar_color: localMatch.avatar_color || m.avatar_color,
-            }
-          : {}),
       };
     });
-    if (isAdminSessionHint && cloudSeeded) {
+    if (isAdminSessionHint && cloudSeeded && !cloudAuthoritative) {
       for (const lm of safeLocal) {
         const unameKey = (lm.username || '').trim().toLowerCase();
         if (unameKey && !seenUsernames.has(unameKey)) {
@@ -398,7 +394,7 @@ export default function App() {
       usedIds.add(candidateId);
       return candidateId === m.id ? m : { ...m, id: candidateId };
     });
-  }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint, isFirebaseAdmin, cloudSeeded]);
+  }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint, cloudSeeded, cloudPublicMembers]);
 
   // Resolve member identity cleanly for both Username+ID sessions and Google Auth sessions
   const resolvedMember = useMemo(() => {
@@ -688,10 +684,11 @@ export default function App() {
     if (cloudSeeded) {
       syncMemberAuthHashesAdmin().catch(() => {});
       if (localMembers.length > 0) {
-        const sig = localMembers.map((m) => `${m.username}:${m.role}`).join('|');
+        const hasCloudMembers = cloudPublicMembers !== null && cloudPublicMembers.length > 0;
+        const sig = `${hasCloudMembers ? 'admins' : 'all'}:${localMembers.map((m) => `${m.username}:${m.role}`).join('|')}`;
         if (missingMembersSyncSigRef.current !== sig) {
           missingMembersSyncSigRef.current = sig;
-          syncMissingMembersToFirestore(localMembers).catch(() => {});
+          syncMissingMembersToFirestore(localMembers, { adminsOnly: hasCloudMembers }).catch(() => {});
         }
       }
       if (
@@ -726,12 +723,150 @@ export default function App() {
     isFirebaseAdmin,
     firestoreQuotaExceeded,
     cloudSeeded,
+    cloudPublicMembers,
     bootstrapReady,
     cloudLmsTasks,
     localLmsTasks,
     localMembers,
     showToast,
   ]);
+
+  // Exchange Firebase Google Admin ID token for an Express admin Bearer token so Main Admin & Pembina share SQLite state
+  useEffect(() => {
+    if (!firebaseAuthReady || !isFirebaseAdmin || !firebaseUser) {
+      firebaseTokenExchangeAttemptedRef.current = false;
+      return;
+    }
+    if (token || firebaseTokenExchangeAttemptedRef.current) return;
+    firebaseTokenExchangeAttemptedRef.current = true;
+
+    firebaseUser
+      .getIdToken()
+      .then((idToken) =>
+        apiFetch<{ token: string; user?: StudentProfile }>('/api/auth/firebase-admin', {
+          method: 'POST',
+          body: JSON.stringify({ idToken }),
+        })
+      )
+      .then((res) => {
+        if (res?.token) {
+          setStoredToken(res.token);
+          setToken(res.token);
+          loadBootstrap();
+        }
+      })
+      .catch(() => {
+        // Non-fatal if offline/no backend
+      });
+  }, [firebaseAuthReady, isFirebaseAdmin, firebaseUser, token, loadBootstrap]);
+
+  // Mirror Cloud Firestore members & branding into SQLite whenever Main Admin loads or edits Cloud data
+  useEffect(() => {
+    if (
+      !isFirebaseAdmin ||
+      !token ||
+      !cloudSeeded ||
+      !Array.isArray(cloudPublicMembers) ||
+      cloudPublicMembers.length === 0
+    ) {
+      return;
+    }
+    const membersPayload = members.map((m) => ({
+      username: m.username,
+      role: m.role,
+      full_name: m.full_name,
+      nis: m.nis,
+      kelas: m.kelas,
+      division: m.division,
+      bio: m.bio,
+      nfc_uid: m.nfc_uid,
+      qr_code_token: m.qr_code_token,
+      parent_whatsapp: m.parent_whatsapp || '',
+      avatar_color: m.avatar_color,
+      avatar_url: m.avatar_url || '',
+      show_in_members: m.show_in_members,
+      attendance_count: m.attendance_count,
+      works_count: m.works_count,
+      lms_points: m.lms_points,
+    }));
+    const sig = JSON.stringify({
+      m: membersPayload,
+      b: cloudBranding || null,
+    });
+    if (cloudToLocalSyncSigRef.current === sig) return;
+    cloudToLocalSyncSigRef.current = sig;
+
+    apiFetch('/api/admin/sync-cloud-state', {
+      method: 'POST',
+      body: JSON.stringify({
+        members: membersPayload,
+        siteSettings: cloudBranding || undefined,
+        allowDeletions: true,
+      }),
+    })
+      .then(() => {
+        loadBootstrap();
+      })
+      .catch(() => {
+        cloudToLocalSyncSigRef.current = '';
+      });
+  }, [isFirebaseAdmin, token, cloudSeeded, cloudPublicMembers, members, cloudBranding, loadBootstrap]);
+
+  // Keep currentUser synced with live Cloud member changes (e.g. edited/deleted by Main Admin)
+  useEffect(() => {
+    if (!currentUser || !cloudSeeded || !Array.isArray(cloudPublicMembers) || cloudPublicMembers.length === 0) {
+      return;
+    }
+    const unameKey = currentUser.username.trim().toLowerCase();
+    const liveMember = members.find((m) => m.username.trim().toLowerCase() === unameKey);
+    if (!liveMember) {
+      if (!isFirebaseAdmin) {
+        localStorage.removeItem(PORTAL_MEMBER_STORAGE_KEY);
+        setStoredToken(null);
+        setToken(null);
+        setCurrentUser(null);
+        showToast('Sesi dihentikan karena data akun telah dihapus oleh Admin Utama.', 'info');
+      }
+      return;
+    }
+    const changed =
+      currentUser.full_name !== liveMember.full_name ||
+      currentUser.role !== liveMember.role ||
+      currentUser.division !== liveMember.division ||
+      currentUser.kelas !== liveMember.kelas ||
+      currentUser.bio !== liveMember.bio ||
+      currentUser.qr_code_token !== liveMember.qr_code_token ||
+      currentUser.avatar_color !== liveMember.avatar_color ||
+      (liveMember.avatar_url && currentUser.avatar_url !== liveMember.avatar_url) ||
+      (liveMember.nis && currentUser.nis !== liveMember.nis) ||
+      (liveMember.nfc_uid && currentUser.nfc_uid !== liveMember.nfc_uid) ||
+      (liveMember.parent_whatsapp !== undefined &&
+        liveMember.parent_whatsapp !== '' &&
+        currentUser.parent_whatsapp !== liveMember.parent_whatsapp) ||
+      currentUser.show_in_members !== liveMember.show_in_members;
+    if (changed) {
+      setCurrentUser((prev) =>
+        prev
+          ? {
+              ...prev,
+              firestoreId: liveMember.firestoreId || prev.firestoreId,
+              full_name: liveMember.full_name || prev.full_name,
+              role: isFirebaseAdmin ? 'admin' : liveMember.role || prev.role,
+              division: liveMember.division || prev.division,
+              kelas: liveMember.kelas || prev.kelas,
+              bio: liveMember.bio ?? prev.bio,
+              qr_code_token: liveMember.qr_code_token || prev.qr_code_token,
+              avatar_color: liveMember.avatar_color || prev.avatar_color,
+              avatar_url: liveMember.avatar_url || prev.avatar_url,
+              nis: liveMember.nis || prev.nis,
+              nfc_uid: liveMember.nfc_uid || prev.nfc_uid,
+              parent_whatsapp: liveMember.parent_whatsapp || prev.parent_whatsapp || '',
+              show_in_members: liveMember.show_in_members ?? prev.show_in_members,
+            }
+          : prev
+      );
+    }
+  }, [currentUser, members, cloudSeeded, cloudPublicMembers, isFirebaseAdmin, showToast]);
 
   // Synthesize effectiveUser from local/portal session OR authenticated Firebase Google session
   const effectiveUser = useMemo<StudentProfile | null>(() => {
@@ -757,13 +892,24 @@ export default function App() {
       return {
         ...currentUser,
         firestoreId: liveMember?.firestoreId || currentUser.firestoreId,
-        bio: liveMember?.bio ?? currentUser.bio,
+        full_name: liveMember?.full_name || currentUser.full_name,
+        kelas: liveMember?.kelas || currentUser.kelas,
         division: liveMember?.division || currentUser.division,
+        bio: liveMember?.bio ?? currentUser.bio,
+        nis: liveMember?.nis || currentUser.nis,
+        nfc_uid: liveMember?.nfc_uid || currentUser.nfc_uid,
+        qr_code_token: liveMember?.qr_code_token || currentUser.qr_code_token,
+        parent_whatsapp: liveMember?.parent_whatsapp || currentUser.parent_whatsapp || '',
+        avatar_color: liveMember?.avatar_color || currentUser.avatar_color,
+        show_in_members: liveMember?.show_in_members ?? currentUser.show_in_members,
         attendance_count: liveMember?.attendance_count ?? currentUser.attendance_count,
         works_count: liveMember?.works_count ?? currentUser.works_count,
-        role: isFirebaseAdmin ? 'admin' : currentUser.role,
+        role: isFirebaseAdmin ? 'admin' : liveMember?.role || currentUser.role,
         avatar_url: chosenAvatar,
-        lms_points: (firebaseUser || currentUser) && cloudLmsTasks !== null ? cloudPoints : currentUser.lms_points,
+        lms_points:
+          (firebaseUser || currentUser) && cloudLmsTasks !== null
+            ? cloudPoints
+            : liveMember?.lms_points ?? currentUser.lms_points,
       };
     }
     if (firebaseUser) {
@@ -953,6 +1099,8 @@ export default function App() {
           const { id, lms_points } = event.payload;
           setLocalMembers((prev) => prev.map((m) => (m.id === id ? { ...m, lms_points } : m)));
           setCurrentUser((prev) => (prev && prev.id === id ? { ...prev, lms_points } : prev));
+        } else if (event.type === 'members:synced') {
+          loadBootstrap();
         } else if (
           event.type === 'task:created' ||
           event.type === 'task:deleted' ||
@@ -966,7 +1114,7 @@ export default function App() {
       setWsConnected
     );
     return cleanup;
-  }, [token, currentUser, showToast, loadLmsTasks, loadPendingCount]);
+  }, [token, currentUser, showToast, loadLmsTasks, loadPendingCount, loadBootstrap]);
 
   const isAdminOnlyTab = (t: MainTab) => t === 'absensi' || t === 'persetujuan' || t === 'admin';
 
@@ -1033,6 +1181,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900 pb-20 md:pb-0">
+      <WelcomeScreen
+        open={showWelcome}
+        brandName={siteBranding.brandName}
+        logoUrl={siteBranding.logoUrl}
+        onComplete={() => setShowWelcome(false)}
+      />
       {/* Top Navigation Bar (Strict 3-Zone Contract) */}
       <header className="sticky top-0 z-30 bg-[#B91C1C] text-white border-b-2 border-[#FACC15] no-print">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-8">

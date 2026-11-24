@@ -709,12 +709,15 @@ export function AdminSection({
     if (editingId === null) return;
     setSavingEdit(true);
     try {
-      const targetMember = members.find((m) => m.id === editingId);
+      const normalizedEditUname = editUsername.trim().toLowerCase();
+      const targetMember =
+        members.find((m) => m.id === editingId) ||
+        members.find((m) => m.username.trim().toLowerCase() === normalizedEditUname);
       if (auth.currentUser && isFirebaseAdmin) {
         await saveStudentToFirestore({
           memberId: targetMember?.firestoreId,
           legacyId: editingId,
-          username: editUsername.trim().toLowerCase(),
+          username: normalizedEditUname,
           role: targetMember?.role || 'student',
           full_name: editFullName.trim(),
           nis: editNis.trim(),
@@ -734,8 +737,10 @@ export function AdminSection({
         await apiFetch(`/api/admin/students/${editingId}`, {
           method: 'PATCH',
           body: JSON.stringify({
+            original_username: targetMember?.username || normalizedEditUname,
             full_name: editFullName,
             username: editUsername,
+            role: targetMember?.role,
             nis: editNis,
             kelas: editKelas,
             division: editDivision,
@@ -744,6 +749,7 @@ export function AdminSection({
             qr_code_token: editQrToken,
             parent_whatsapp: editParentWhatsapp.trim(),
             avatar_color: editAvatarColor,
+            avatar_url: targetMember?.avatar_url,
             password: editPass || undefined,
           }),
         }).catch((err) => {
@@ -769,7 +775,10 @@ export function AdminSection({
         await deleteStudentFromFirestore(fId);
       }
       if (getStoredToken()) {
-        await apiFetch(`/api/admin/students/${student.id}`, { method: 'DELETE' }).catch((err) => {
+        await apiFetch(
+          `/api/admin/students/${student.id}?username=${encodeURIComponent(student.username)}`,
+          { method: 'DELETE' }
+        ).catch((err) => {
           if (!(auth.currentUser && isFirebaseAdmin)) throw err;
         });
       }

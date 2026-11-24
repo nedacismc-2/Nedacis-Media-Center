@@ -614,6 +614,139 @@ app.post('/api/auth/login', (req, res) => {
   res.json({ token, user: { ...safeUser, lms_points: getUserTotalLmsPoints(user.id) } });
 });
 
+const FIREBASE_APPLET_CONFIG_PATH = path.resolve(process.cwd(), 'firebase-applet-config.json');
+let cachedFirebaseProjectId = '';
+try {
+  if (fs.existsSync(FIREBASE_APPLET_CONFIG_PATH)) {
+    const parsed = JSON.parse(fs.readFileSync(FIREBASE_APPLET_CONFIG_PATH, 'utf8')) as { projectId?: string };
+    cachedFirebaseProjectId = String(parsed.projectId || '').trim();
+  }
+} catch {
+  cachedFirebaseProjectId = '';
+}
+
+let cachedFirebaseCerts: Record<string, string> = {};
+let cachedFirebaseCertsExpiresAt = 0;
+
+async function getFirebasePublicCerts(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (cachedFirebaseCertsExpiresAt > now && Object.keys(cachedFirebaseCerts).length > 0) {
+    return cachedFirebaseCerts;
+  }
+  const resp = await fetch(
+    'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+  );
+  if (!resp.ok) {
+    throw new Error('Gagal mengambil sertifikat publik Firebase Auth.');
+  }
+  const cacheControl = resp.headers.get('cache-control') || '';
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/i);
+  const maxAgeSec = maxAgeMatch ? Number(maxAgeMatch[1]) : 3600;
+  cachedFirebaseCerts = (await resp.json()) as Record<string, string>;
+  cachedFirebaseCertsExpiresAt = now + Math.max(60, maxAgeSec) * 1000;
+  return cachedFirebaseCerts;
+}
+
+function decodeBase64UrlJson<T>(segment: string): T {
+  const padded = segment.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (segment.length % 4)) % 4);
+  return JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as T;
+}
+
+async function verifyFirebaseAdminIdToken(idToken: string): Promise<{ uid: string; email: string }> {
+  const parts = idToken.split('.');
+  if (parts.length !== 3 || !cachedFirebaseProjectId) {
+    throw new Error('Token Firebase tidak valid.');
+  }
+  const [headerB64, payloadB64, signatureB64] = parts;
+  const header = decodeBase64UrlJson<{ alg?: string; kid?: string }>(headerB64);
+  const payload = decodeBase64UrlJson<{
+    aud?: string;
+    iss?: string;
+    sub?: string;
+    exp?: number;
+    iat?: number;
+    email?: string;
+    email_verified?: boolean;
+  }>(payloadB64);
+
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new Error('Algoritma token Firebase tidak valid.');
+  }
+  const certs = await getFirebasePublicCerts();
+  const cert = certs[header.kid];
+  if (!cert) {
+    throw new Error('Sertifikat penandatangan token tidak ditemukan.');
+  }
+
+  const signatureBuf = Buffer.from(
+    signatureB64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (signatureB64.length % 4)) % 4),
+    'base64'
+  );
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${headerB64}.${payloadB64}`);
+  verifier.end();
+  if (!verifier.verify(cert, signatureBuf)) {
+    throw new Error('Tanda tangan token Firebase tidak valid.');
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (
+    payload.aud !== cachedFirebaseProjectId ||
+    payload.iss !== `https://securetoken.google.com/${cachedFirebaseProjectId}` ||
+    !payload.sub ||
+    typeof payload.exp !== 'number' ||
+    payload.exp <= nowSec ||
+    typeof payload.iat !== 'number' ||
+    payload.iat > nowSec + 300
+  ) {
+    throw new Error('Klaim token Firebase tidak sesuai atau kedaluwarsa.');
+  }
+
+  const email = String(payload.email || '').trim().toLowerCase();
+  if (!payload.email_verified || email !== 'nedacismc@gmail.com') {
+    throw new Error('Akun Google bukan Admin Utama Nedacis Media Center.');
+  }
+
+  return { uid: payload.sub, email };
+}
+
+app.post('/api/auth/firebase-admin', async (req, res) => {
+  const { idToken } = req.body as { idToken?: string };
+  if (!idToken || typeof idToken !== 'string') {
+    res.status(400).json({ error: 'Token Firebase wajib disertakan.' });
+    return;
+  }
+
+  try {
+    await verifyFirebaseAdminIdToken(idToken);
+    let adminUser = db.prepare(`SELECT * FROM users WHERE LOWER(username) = 'admin' LIMIT 1`).get() as
+      | (AuthUser & { password_hash: string })
+      | undefined;
+    if (!adminUser) {
+      adminUser = db.prepare(`SELECT * FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1`).get() as
+        | (AuthUser & { password_hash: string })
+        | undefined;
+    }
+    if (!adminUser) {
+      res.status(404).json({ error: 'Akun admin lokal tidak ditemukan.' });
+      return;
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(
+      token,
+      adminUser.id,
+      expiresAt
+    );
+
+    const { password_hash: _ignored, ...safeUser } = adminUser;
+    res.json({ token, user: { ...safeUser, lms_points: getUserTotalLmsPoints(adminUser.id) } });
+  } catch (err) {
+    res.status(403).json({ error: err instanceof Error ? err.message : 'Otorisasi Admin Google gagal.' });
+  }
+});
+
 app.post('/api/auth/logout', (req, res) => {
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
@@ -836,6 +969,7 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
       FROM users WHERE id = ?
     `).get(info.lastInsertRowid);
     checkpointDatabase('PASSIVE');
+    broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
     res.status(201).json({ student: created });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal membuat akun siswa.' });
@@ -1050,6 +1184,7 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
     })();
 
     checkpointDatabase('PASSIVE');
+    broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
     res.json({ ok: true, created, updated, skipped, errors });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal mengimport data anggota.' });
@@ -1057,10 +1192,12 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
 });
 
 app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
-  const id = Number(req.params.id);
+  const paramId = Number(req.params.id);
   const {
     full_name,
     username,
+    original_username,
+    role,
     nis,
     kelas,
     division,
@@ -1069,10 +1206,14 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     qr_code_token,
     parent_whatsapp,
     avatar_color,
+    avatar_url,
+    show_in_members,
     password,
   } = req.body as {
     full_name?: string;
     username?: string;
+    original_username?: string;
+    role?: 'admin' | 'student';
     nis?: string;
     kelas?: string;
     division?: string;
@@ -1081,14 +1222,25 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     qr_code_token?: string;
     parent_whatsapp?: string;
     avatar_color?: string;
+    avatar_url?: string;
+    show_in_members?: boolean | number;
     password?: string;
   };
 
-  const existing = db.prepare('SELECT * FROM users WHERE id = ? AND (role = ? OR show_in_members = 1)').get(id, 'student') as AuthUser | undefined;
+  let existing = Number.isFinite(paramId)
+    ? (db.prepare('SELECT * FROM users WHERE id = ? AND (role = ? OR show_in_members = 1)').get(paramId, 'student') as AuthUser | undefined)
+    : undefined;
+  const lookupUsername = (original_username || username || '').trim();
+  if (!existing && lookupUsername) {
+    existing = db
+      .prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND (role = ? OR show_in_members = 1)')
+      .get(lookupUsername, 'student') as AuthUser | undefined;
+  }
   if (!existing) {
     res.status(404).json({ error: 'Anggota tidak ditemukan.' });
     return;
   }
+  const id = existing.id;
 
   try {
     let cleanUsername: string | null = null;
@@ -1129,6 +1281,9 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
       if (cleanUsername !== null) {
         db.prepare('UPDATE users SET username = ? WHERE id = ?').run(cleanUsername, id);
       }
+      if ((role === 'admin' || role === 'student') && existing!.username.toLowerCase() !== 'admin') {
+        db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+      }
       if (cleanNfc !== null) {
         db.prepare('UPDATE users SET nfc_uid = ? WHERE id = ?').run(cleanNfc, id);
       }
@@ -1157,15 +1312,23 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
       if (avatar_color !== undefined && /^#[0-9A-Fa-f]{6}$/.test(avatar_color.trim())) {
         db.prepare('UPDATE users SET avatar_color = ? WHERE id = ?').run(avatar_color.trim(), id);
       }
+      if (avatar_url !== undefined) {
+        db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(avatar_url.trim().slice(0, 500), id);
+      }
+      if (show_in_members !== undefined) {
+        const nextShow = show_in_members === true || show_in_members === 1 ? 1 : 0;
+        db.prepare('UPDATE users SET show_in_members = ? WHERE id = ?').run(nextShow, id);
+      }
       if (password && password.trim().length >= 4) {
         db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password.trim()), id);
       }
     })();
 
     checkpointDatabase('PASSIVE');
+    broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
 
     const updated = db.prepare(`
-      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, created_at
+      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, created_at
       FROM users WHERE id = ?
     `).get(id) as AuthUser;
     res.json({ student: { ...updated, lms_points: getUserTotalLmsPoints(id) } });
@@ -1176,13 +1339,222 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
 
 app.delete('/api/admin/students/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
-  const info = db.prepare('DELETE FROM users WHERE id = ? AND role = ?').run(id, 'student');
+  const queryUsername = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+  let info = Number.isFinite(id)
+    ? db.prepare('DELETE FROM users WHERE id = ? AND role = ?').run(id, 'student')
+    : { changes: 0 };
+  if (info.changes === 0 && queryUsername) {
+    info = db.prepare('DELETE FROM users WHERE LOWER(username) = LOWER(?) AND role = ?').run(queryUsername, 'student');
+  }
   if (info.changes === 0) {
     res.status(404).json({ error: 'Akun siswa tidak ditemukan.' });
     return;
   }
   checkpointDatabase('PASSIVE');
+  broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
   res.json({ ok: true });
+});
+
+app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
+  const { members, siteSettings, allowDeletions } = req.body as {
+    members?: Array<{
+      username?: string;
+      role?: 'admin' | 'student';
+      full_name?: string;
+      nis?: string;
+      kelas?: string;
+      division?: string;
+      bio?: string;
+      nfc_uid?: string;
+      qr_code_token?: string;
+      parent_whatsapp?: string;
+      avatar_color?: string;
+      avatar_url?: string;
+      show_in_members?: number | boolean;
+    }>;
+    siteSettings?: {
+      brandName?: string;
+      logoUrl?: string;
+      heroEyebrow?: string;
+      heroTitle?: string;
+      heroDescription?: string;
+      heroImageUrl?: string;
+      footerAddress?: string;
+      socialLinks?: unknown[];
+    };
+    allowDeletions?: boolean;
+  };
+
+  const now = new Date().toISOString();
+  let syncedMembers = 0;
+
+  try {
+    db.transaction(() => {
+      if (Array.isArray(members) && members.length > 0) {
+        const cloudUsernames = new Set<string>();
+        for (const m of members) {
+          const cleanUsername = String(m.username || '')
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9._-]/g, '');
+          if (!cleanUsername || cleanUsername.length < 2) continue;
+          cloudUsernames.add(cleanUsername);
+
+          const existing = db
+            .prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)')
+            .get(cleanUsername) as (AuthUser & { show_in_members?: number }) | undefined;
+
+          const role: 'admin' | 'student' =
+            cleanUsername === 'admin' ? 'admin' : m.role === 'admin' ? 'admin' : 'student';
+          const fullName = String(m.full_name || existing?.full_name || cleanUsername).trim().slice(0, 120);
+          const kelas = String(m.kelas || existing?.kelas || (role === 'admin' ? 'Pembina' : '8A')).trim().slice(0, 30);
+          const division = String(m.division || existing?.division || 'Fotografi').trim().slice(0, 40);
+          const bio = String(m.bio ?? existing?.bio ?? '').trim().slice(0, 400);
+          const avatarColor =
+            m.avatar_color && /^#[0-9A-Fa-f]{6}$/.test(m.avatar_color.trim())
+              ? m.avatar_color.trim().toUpperCase()
+              : existing?.avatar_color || '#1D4ED8';
+          const avatarUrl =
+            m.avatar_url !== undefined ? String(m.avatar_url || '').trim().slice(0, 500) : existing?.avatar_url || '';
+          const showInMembers =
+            m.show_in_members !== undefined
+              ? m.show_in_members === true || m.show_in_members === 1
+                ? 1
+                : 0
+              : existing?.show_in_members ?? (role === 'student' ? 1 : 1);
+          const nis = String(m.nis || '').trim().slice(0, 40) || existing?.nis || cleanUsername;
+          const parentWa =
+            m.parent_whatsapp !== undefined
+              ? normalizeWhatsappServer(m.parent_whatsapp) || String(m.parent_whatsapp).trim().slice(0, 30)
+              : existing?.parent_whatsapp || '';
+
+          if (existing) {
+            let nextNfc = String(m.nfc_uid || '').trim().toUpperCase() || existing.nfc_uid;
+            if (nextNfc) {
+              const dupNfc = db
+                .prepare('SELECT id FROM users WHERE UPPER(nfc_uid) = UPPER(?) AND id != ?')
+                .get(nextNfc, existing.id);
+              if (dupNfc) nextNfc = existing.nfc_uid;
+            }
+            let nextQr = String(m.qr_code_token || '').trim().toUpperCase() || existing.qr_code_token;
+            if (nextQr) {
+              const dupQr = db
+                .prepare('SELECT id FROM users WHERE UPPER(qr_code_token) = UPPER(?) AND id != ?')
+                .get(nextQr, existing.id);
+              if (dupQr) nextQr = existing.qr_code_token;
+            }
+
+            db.prepare(`
+              UPDATE users
+              SET role = ?, full_name = ?, nis = ?, kelas = ?, division = ?, bio = ?,
+                  nfc_uid = ?, qr_code_token = ?, parent_whatsapp = ?, avatar_color = ?, avatar_url = ?, show_in_members = ?
+              WHERE id = ?
+            `).run(
+              role,
+              fullName,
+              nis,
+              kelas,
+              division,
+              bio,
+              nextNfc,
+              nextQr,
+              parentWa,
+              avatarColor,
+              avatarUrl,
+              showInMembers,
+              existing.id
+            );
+          } else {
+            let nextNfc =
+              String(m.nfc_uid || '').trim().toUpperCase() ||
+              `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+            if (db.prepare('SELECT id FROM users WHERE UPPER(nfc_uid) = UPPER(?)').get(nextNfc)) {
+              nextNfc = `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+            }
+            let nextQr =
+              String(m.qr_code_token || '').trim().toUpperCase() ||
+              `NMC-${cleanUsername.toUpperCase().slice(0, 8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+            if (db.prepare('SELECT id FROM users WHERE UPPER(qr_code_token) = UPPER(?)').get(nextQr)) {
+              nextQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+            }
+            const defaultPass = role === 'admin' ? 'pembina123' : 'siswa123';
+            db.prepare(`
+              INSERT INTO users (
+                username, password_hash, role, full_name, nis, kelas, division, bio,
+                nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, created_at
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              cleanUsername,
+              hashPassword(defaultPass),
+              role,
+              fullName,
+              nis,
+              kelas,
+              division,
+              bio,
+              nextNfc,
+              nextQr,
+              parentWa,
+              avatarColor,
+              avatarUrl,
+              showInMembers,
+              now
+            );
+          }
+          syncedMembers++;
+        }
+
+        if (allowDeletions && cloudUsernames.size >= 3) {
+          const localStudents = db
+            .prepare(`SELECT id, username FROM users WHERE role = 'student'`)
+            .all() as Array<{ id: number; username: string }>;
+          for (const ls of localStudents) {
+            if (!cloudUsernames.has(ls.username.trim().toLowerCase())) {
+              db.prepare('DELETE FROM users WHERE id = ?').run(ls.id);
+            }
+          }
+        }
+      }
+
+      if (siteSettings && typeof siteSettings === 'object') {
+        const upsertSetting = db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES (?, ?, ?)`);
+        if (siteSettings.brandName !== undefined) {
+          upsertSetting.run('brand_name', String(siteSettings.brandName || 'Multimedia').slice(0, 60), now);
+        }
+        if (siteSettings.logoUrl !== undefined) {
+          upsertSetting.run('brand_logo_url', String(siteSettings.logoUrl || '').slice(0, 500), now);
+        }
+        if (siteSettings.heroEyebrow !== undefined) {
+          upsertSetting.run('hero_eyebrow', String(siteSettings.heroEyebrow || '').slice(0, 120), now);
+        }
+        if (siteSettings.heroTitle !== undefined) {
+          upsertSetting.run('hero_title', String(siteSettings.heroTitle || '').slice(0, 160), now);
+        }
+        if (siteSettings.heroDescription !== undefined) {
+          upsertSetting.run('hero_description', String(siteSettings.heroDescription || '').slice(0, 600), now);
+        }
+        if (siteSettings.heroImageUrl !== undefined) {
+          upsertSetting.run('hero_image_url', String(siteSettings.heroImageUrl || '').slice(0, 500), now);
+        }
+        if (siteSettings.footerAddress !== undefined) {
+          upsertSetting.run('footer_address', String(siteSettings.footerAddress || '').slice(0, 200), now);
+        }
+        if (Array.isArray(siteSettings.socialLinks)) {
+          upsertSetting.run('social_links', JSON.stringify(siteSettings.socialLinks.slice(0, 12)), now);
+        }
+      }
+    })();
+
+    checkpointDatabase('PASSIVE');
+    broadcastEvent({ type: 'members:synced', payload: { updatedAt: now } });
+    if (siteSettings) {
+      broadcastEvent({ type: 'settings:updated', payload: getSiteSettings() });
+    }
+    res.json({ ok: true, syncedMembers });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Gagal menyinkronkan data Cloud.' });
+  }
 });
 
 // ==================== ATTENDANCE (NFC/RFID USB READER & QR CODE + MASUK/PULANG + WA) ====================

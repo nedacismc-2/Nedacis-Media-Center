@@ -260,4 +260,5 @@ export type WSEvent =
   | { type: 'task:deleted'; payload: { id: number } }
   | { type: 'task:submitted'; payload: { taskId: number; userId: number } }
   | { type: 'task:reviewed'; payload: { taskId: number; userId: number; status: string; points_awarded: number; admin_feedback: string } }
-  | { type: 'member:points_updated'; payload: { id: number; lms_points: number } };
+  | { type: 'member:points_updated'; payload: { id: number; lms_points: number } }
+  | { type: 'members:synced'; payload: { updatedAt: string } };
