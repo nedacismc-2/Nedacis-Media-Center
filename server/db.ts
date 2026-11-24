@@ -425,6 +425,7 @@ export function initDatabase() {
     }
 
     ensurePembinaMemberAccounts();
+    ensureDefaultStudentsRemoved(nowInit);
     ensureSampleLmsTasks();
     ensureNmcRebrandMigration(nowInit);
   })();
@@ -608,10 +609,52 @@ function ensurePembinaMemberAccounts() {
   db.prepare(`INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('pembina_seeded', '1', ?)`).run(now);
 }
 
+export const DEFAULT_SEED_STUDENT_USERNAMES = [
+  'ahmad.fauzan',
+  'siti.nurhaliza',
+  'rizky.ramadhan',
+  'alya.azzahra',
+  'dimas.saputra',
+  'nadia.khairunnisa',
+  'fajar.nugraha',
+  'putri.ramadhani',
+  'bima.pangestu',
+  'keisha.amelia',
+  'rehan.maulana',
+  'zahra.maulida',
+  'ilham.hidayat',
+  'salma.fitriani',
+  'galih.permana',
+  'tiara.anggraini',
+  'rafi.akbar',
+  'citra.lestari',
+  'bayu.krisna',
+  'intan.permata',
+] as const;
+
+function ensureDefaultStudentsRemoved(nowIso: string) {
+  const cleanedFlag = db.prepare(`SELECT value FROM site_settings WHERE key = 'default_students_removed_v1'`).get() as
+    | { value: string }
+    | undefined;
+  if (cleanedFlag?.value === '1') return;
+
+  const placeholders = DEFAULT_SEED_STUDENT_USERNAMES.map(() => '?').join(', ');
+  db.prepare(
+    `DELETE FROM users WHERE role = 'student' AND LOWER(username) IN (${placeholders})`
+  ).run(...DEFAULT_SEED_STUDENT_USERNAMES);
+
+  db.prepare(
+    `DELETE FROM notifications WHERE user_id IS NULL AND link_target = 'galeri' AND message LIKE '%Sudut Pagi Lembah Ciamis%'`
+  ).run();
+
+  db.prepare(
+    `INSERT OR REPLACE INTO site_settings (key, value, updated_at) VALUES ('default_students_removed_v1', '1', ?)`
+  ).run(nowIso);
+}
+
 function seedInitialData() {
   const now = new Date().toISOString();
   const adminHash = hashPassword('adminmmc');
-  const studentHash = hashPassword('siswa123');
 
   const insertUser = db.prepare(`
     INSERT INTO users (username, password_hash, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, avatar_color, created_at)
@@ -633,52 +676,6 @@ function seedInitialData() {
     '#0F172A',
     now
   );
-
-  // 20 Registered Students
-  const studentsSeed = [
-    ['ahmad.fauzan', 'Ahmad Fauzan Pratama', '242507001', '9A', 'Videografi', 'Ketua NMC periode 2026/2027. Fokus pada sinematografi dokumenter kegiatan sekolah.', '#1D4ED8'],
-    ['siti.nurhaliza', 'Siti Nurhaliza Putri', '242507002', '9B', 'Fotografi', 'Fotografer utama liputan upacara, P5, dan dokumentasi prestasi siswa SMPN 2 Ciamis.', '#0F766E'],
-    ['rizky.ramadhan', 'Rizky Ramadhan', '242507003', '9A', 'Jurnalistik', 'Pemimpin redaksi buletin digital sekolah dan penulis artikel berita mingguan.', '#B45309'],
-    ['alya.azzahra', 'Alya Azzahra Dewi', '242507004', '9C', 'Desain Grafis', 'Desainer poster acara sekolah, majalah dinding digital, dan identitas visual NMC.', '#BE123C'],
-    ['dimas.saputra', 'Dimas Aditya Saputra', '242507005', '8A', 'Penyiaran', 'Penyiar podcast suara siswa dan operator audio studio NMC SMPN 2 Ciamis.', '#4338CA'],
-    ['nadia.khairunnisa', 'Nadia Khairunnisa', '242507006', '8B', 'Fotografi', 'Menyukai fotografi arsitektur sekolah dan potret candid kegiatan ekstrakurikuler.', '#0369A1'],
-    ['fajar.nugraha', 'Fajar Nugraha', '242507007', '8C', 'Videografi', 'Editor video rekap acara sekolah dan motion graphic pengumuman resmi.', '#047857'],
-    ['putri.ramadhani', 'Putri Rahma Ramadhani', '242507008', '8A', 'Jurnalistik', 'Reporter lapangan untuk liputan lomba OSN, O2SN, dan FLS2N tingkat kabupaten.', '#7C2D12'],
-    ['bima.pangestu', 'Bima Satria Pangestu', '242507009', '8D', 'Desain Grafis', 'Ilustrator infografis edukasi dan layout buletin bulanan Nedacis.', '#1E40AF'],
-    ['keisha.amelia', 'Keisha Amelia Putri', '242507010', '9D', 'Penyiaran', 'Host program wawancara guru inspiratif dan podcaster edisi literasi.', '#9F1239'],
-    ['rehan.maulana', 'Rehan Maulana', '242507011', '7A', 'Fotografi', 'Anggota muda divisi fotografi dengan minat foto alam dan lingkungan hijau sekolah.', '#0D9488'],
-    ['zahra.maulida', 'Zahra Maulida', '242507012', '7B', 'Jurnalistik', 'Penulis berita kegiatan kepramukaan dan dokumentasi hari besar nasional.', '#C2410C'],
-    ['ilham.hidayat', 'Ilham Taufiq Hidayat', '242507013', '7C', 'Videografi', 'Kameramen lapangan untuk dokumentasi pertandingan olahraga antar kelas.', '#1D4ED8'],
-    ['salma.fitriani', 'Salma Fitriani', '242507014', '8E', 'Desain Grafis', 'Pengolah tipografi dan template konten media sosial resmi SMPN 2 Ciamis.', '#6D28D9'],
-    ['galih.permana', 'Galih Permana', '242507015', '9B', 'Penyiaran', 'Teknisi tata suara dan perekaman suara untuk produksi video profil sekolah.', '#334155'],
-    ['tiara.anggraini', 'Tiara Anggraini', '242507016', '7D', 'Fotografi', 'Spesialis foto detail pameran karya siswa dan dokumentasi laboratorium.', '#0E7490'],
-    ['rafi.akbar', 'Rafi Akbar Wijaya', '242507017', '8B', 'Videografi', 'Pengarah gaya dan kameramen proyek film pendek edukasi anti-perundungan.', '#15803D'],
-    ['citra.lestari', 'Citra Ayu Lestari', '242507018', '7A', 'Jurnalistik', 'Pewawancara tamu sekolah dan penyusun catatan liputan kegiatan OSIS.', '#B91C1C'],
-    ['bayu.krisna', 'Bayu Krisna Murti', '242507019', '9C', 'Desain Grafis', 'Desainer kartu pelajar digital dan materi publikasi penerimaan anggota baru.', '#1E3A8A'],
-    ['intan.permata', 'Intan Permata Sari', '242507020', '8C', 'Penyiaran', 'Moderator diskusi panel siswa dan pembaca berita pagi radio sekolah.', '#86198F'],
-  ] as const;
-
-  const studentIds: number[] = [];
-  studentsSeed.forEach((s, idx) => {
-    const num = String(idx + 1).padStart(2, '0');
-    const nfcUid = `04E2A100${num}`;
-    const qrToken = `NMC-CMS-0${num}`;
-    const info = insertUser.run(
-      s[0],
-      studentHash,
-      'student',
-      s[1],
-      s[2],
-      s[3],
-      s[4],
-      s[5],
-      nfcUid,
-      qrToken,
-      s[6],
-      now
-    );
-    studentIds.push(Number(info.lastInsertRowid));
-  });
 
   // Seed news articles
   const insertArticle = db.prepare(`
@@ -785,120 +782,9 @@ function seedInitialData() {
     0
   );
 
-  // Seed initial works
-  const insertWork = db.prepare(`
-    INSERT INTO works (user_id, title, description, category, media_type, media_url, shares_count, comments_disabled, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const w1 = Number(insertWork.run(
-    studentIds[1],
-    'Sudut Pagi Lembah Ciamis dalam Bingkai Dokumenter',
-    'Eksperimen fotografi lanskap pagi hari dengan teknik pencahayaan alami untuk proyek dokumenter lingkungan Jawa Barat.',
-    'Fotografi',
-    'image',
-    'asset:work_ciamis',
-    5,
-    0,
-    '2026-11-13T08:30:00.000Z'
-  ).lastInsertRowid);
-
-  const w2 = Number(insertWork.run(
-    studentIds[0],
-    'Di Balik Layar Penyuntingan Film Pendek Anti-Perundungan',
-    'Proses color grading dan penyusunan linimasa audio untuk film pendek edukasi yang diproduksi oleh tim kelas 8 dan 9.',
-    'Videografi',
-    'image',
-    'asset:work_editing',
-    3,
-    0,
-    '2026-11-12T14:15:00.000Z'
-  ).lastInsertRowid);
-
-  const w3 = Number(insertWork.run(
-    studentIds[2],
-    'Arsip Foto Liputan Pentas Seni & Tari Tradisional',
-    'Kumpulan bidikan monokromatik ekspresi penampil dan tim fotografer siswa saat acara Pentas Seni sekolah.',
-    'Liputan',
-    'image',
-    'asset:news_liputan',
-    7,
-    0,
-    '2026-11-11T10:00:00.000Z'
-  ).lastInsertRowid);
-
-  const w4 = Number(insertWork.run(
-    studentIds[4],
-    'Sesi Perekaman Podcast Suara Nedacis — Ruang Siaran',
-    'Dokumentasi persiapan audio interface dan mikrofon studio sebelum siaran episode literasi digital dimulai.',
-    'Desain Grafis',
-    'image',
-    'asset:news_podcast',
-    2,
-    0,
-    '2026-11-10T11:45:00.000Z'
-  ).lastInsertRowid);
-
-  const w5 = Number(insertWork.run(
-    studentIds[6],
-    'Kolaborasi Tim Kamera Studio Produksi NMC',
-    'Pengujian fokus lensa dan pemantauan monitor lapangan oleh tim produksi utama sebelum siaran langsung upacara.',
-    'Videografi',
-    'image',
-    'asset:hero_studio',
-    4,
-    0,
-    '2026-11-08T09:20:00.000Z'
-  ).lastInsertRowid);
-
-  // Seed likes & positive comments
-  const insertLike = db.prepare('INSERT OR IGNORE INTO work_likes (work_id, user_id, created_at) VALUES (?, ?, ?)');
-  [studentIds[0], studentIds[2], studentIds[3], studentIds[4], studentIds[5]].forEach(uid => insertLike.run(w1, uid, now));
-  [studentIds[1], studentIds[3], studentIds[6]].forEach(uid => insertLike.run(w2, uid, now));
-  [studentIds[0], studentIds[1], studentIds[7], studentIds[9]].forEach(uid => insertLike.run(w3, uid, now));
-  [studentIds[0], studentIds[9]].forEach(uid => insertLike.run(w4, uid, now));
-  [studentIds[1], studentIds[4], studentIds[12]].forEach(uid => insertLike.run(w5, uid, now));
-
-  const insertComment = db.prepare(`
-    INSERT INTO work_comments (work_id, user_id, content, is_hidden, flagged_reason, created_at)
-    VALUES (?, ?, ?, 0, NULL, ?)
-  `);
-  insertComment.run(w1, studentIds[0], 'Komposisi kabut dan teraseringnya sangat rapi, pencahayaannya seimbang sekali!', '2026-11-13T09:10:00.000Z');
-  insertComment.run(w1, studentIds[2], 'Cocok sekali untuk sampul majalah literasi sekolah edisi akhir semester.', '2026-11-13T10:05:00.000Z');
-  insertComment.run(w2, studentIds[6], 'Pengaturan warna di monitor sudah konsisten, semangat tim editing!', '2026-11-12T15:30:00.000Z');
-  insertComment.run(w3, studentIds[7], 'Foto hitam-putihnya kuat menangkap momen fokus para fotografer di lapangan.', '2026-11-11T13:20:00.000Z');
-
   // Seed negative word filter list
   const insertWord = db.prepare('INSERT OR IGNORE INTO blocked_words (word) VALUES (?)');
   ['bodoh', 'goblok', 'anjing', 'bego', 'jelek banget', 'tolol', 'sampah', 'norak', 'idiot', 'cacat', 'banci', 'kasar'].forEach(w => insertWord.run(w));
-
-  // Seed realistic November 2026 attendance records across the 20 students
-  const insertAtt = db.prepare(`
-    INSERT OR IGNORE INTO attendance_records (user_id, attendance_date, check_in_time, method, status, session_title, recorded_by, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const pastDates = [
-    { date: '2026-11-02', session: 'Sosialisasi Sistem NFC & QR NMC' },
-    { date: '2026-11-05', session: 'Workshop Penyuntingan Video Dokumenter' },
-    { date: '2026-11-09', session: 'Produksi Podcast Suara Nedacis' },
-    { date: '2026-11-12', session: 'Liputan Gebyar Pentas Seni & Budaya' },
-  ];
-
-  studentIds.forEach((uid, idx) => {
-    pastDates.forEach((sess, dIdx) => {
-      // Deterministic realistic attendance pattern so monthly report shows varied data
-      if ((idx + dIdx) % 9 === 0) return; // occasional absent
-      const isLate = (idx + dIdx) % 7 === 0;
-      const isIzin = (idx + dIdx) % 11 === 0;
-      const status = isIzin ? 'Izin' : isLate ? 'Terlambat' : 'Hadir';
-      const method = isIzin ? 'Manual Admin' : idx % 3 === 0 ? 'QR Scan' : 'NFC/RFID';
-      const minute = isLate ? String(16 + (idx % 12)).padStart(2, '0') : String(50 + (idx % 9)).padStart(2, '0');
-      const hour = isLate ? '15' : '14';
-      const time = `${hour}:${minute}:${String((idx * 7) % 59).padStart(2, '0')}`;
-      insertAtt.run(uid, sess.date, time, method, status, sess.session, 'Pembina NMC', `${sess.date}T${time}.000Z`);
-    });
-  });
 
   // Seed initial notifications
   const insertNotif = db.prepare(`
@@ -911,14 +797,6 @@ function seedInitialData() {
     'Pengingat Jadwal: Praktik Lapangan Fotografi Jurnalistik',
     'Kegiatan dilaksanakan Senin, 16 November 2026 pukul 15:00 WIB di Lapangan Utama & Studio NMC. Harap membawa kartu pelajar NFC untuk absensi.',
     'jadwal',
-    now
-  );
-  insertNotif.run(
-    studentIds[1],
-    'like',
-    'Karya Anda Mendapat Apresiasi',
-    '5 anggota menyukai karya "Sudut Pagi Lembah Ciamis dalam Bingkai Dokumenter".',
-    'galeri',
     now
   );
 }

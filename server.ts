@@ -1505,7 +1505,7 @@ app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
           syncedMembers++;
         }
 
-        if (allowDeletions && cloudUsernames.size >= 3) {
+        if (allowDeletions && cloudUsernames.size >= 1) {
           const localStudents = db
             .prepare(`SELECT id, username FROM users WHERE role = 'student'`)
             .all() as Array<{ id: number; username: string }>;

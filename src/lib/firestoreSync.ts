@@ -2704,3 +2704,73 @@ export async function syncMissingMembersToFirestore(
     return 0;
   }
 }
+
+export const DEFAULT_SEED_STUDENT_USERNAMES = new Set([
+  'ahmad.fauzan',
+  'siti.nurhaliza',
+  'rizky.ramadhan',
+  'alya.azzahra',
+  'dimas.saputra',
+  'nadia.khairunnisa',
+  'fajar.nugraha',
+  'putri.ramadhani',
+  'bima.pangestu',
+  'keisha.amelia',
+  'rehan.maulana',
+  'zahra.maulida',
+  'ilham.hidayat',
+  'salma.fitriani',
+  'galih.permana',
+  'tiara.anggraini',
+  'rafi.akbar',
+  'citra.lestari',
+  'bayu.krisna',
+  'intan.permata',
+]);
+
+export async function removeDefaultSeedMembersFromFirestore(
+  cloudMembers: StudentProfile[]
+): Promise<number> {
+  const uid = auth.currentUser?.uid;
+  if (!uid || isFirestoreQuotaExceeded() || !Array.isArray(cloudMembers) || cloudMembers.length === 0) {
+    return 0;
+  }
+
+  const targets = cloudMembers.filter(
+    (m) =>
+      m.role !== 'admin' &&
+      DEFAULT_SEED_STUDENT_USERNAMES.has((m.username || '').trim().toLowerCase()) &&
+      /^NMC-CMS-0(0[1-9]|1[0-9]|20)$/i.test((m.qr_code_token || '').trim())
+  );
+  if (targets.length === 0) return 0;
+
+  try {
+    let batch = writeBatch(db);
+    let opCount = 0;
+    let deletedCount = 0;
+
+    for (const m of targets) {
+      const memberId = m.firestoreId || sanitizeDocId(`member_${m.username}`);
+      batch.delete(doc(db, 'members_private', memberId));
+      batch.delete(doc(db, 'members_public', memberId));
+      opCount += 2;
+      deletedCount++;
+
+      if (opCount >= 380) {
+        await batch.commit();
+        batch = writeBatch(db);
+        opCount = 0;
+      }
+    }
+
+    if (opCount > 0) {
+      await batch.commit();
+    }
+    return deletedCount;
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      markFirestoreQuotaExceeded();
+    }
+    return 0;
+  }
+}

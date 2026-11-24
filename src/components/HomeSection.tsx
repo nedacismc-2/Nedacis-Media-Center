@@ -144,7 +144,7 @@ export function HomeSection({
         <div className="bg-white border border-slate-200 rounded-xl p-5">
           <p className="text-xs font-medium text-slate-500">Peserta Terdaftar</p>
           <p className="mt-2 text-2xl sm:text-3xl font-semibold text-[#C81E1E] font-mono tabular-nums">
-            {memberCount} / 20
+            {memberCount}
           </p>
           <p className="mt-1 text-xs text-slate-500">Siswa aktif kelas 7, 8, dan 9</p>
         </div>

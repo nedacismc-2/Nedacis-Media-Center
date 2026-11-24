@@ -1858,10 +1858,10 @@ export function AdminSection({
               <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-700 space-y-3">
                 <div className="space-y-1">
                   <p className="font-semibold text-slate-900">
-                    Kapasitas Peserta Terdaftar: {studentMembers.length} dari 20 Siswa (+{members.length - studentMembers.length} Pembina)
+                    Total Peserta Terdaftar: {studentMembers.length} Siswa (+{members.length - studentMembers.length} Pembina)
                   </p>
                   <p>
-                    Password bawaan seluruh akun siswa awal adalah <span className="font-mono font-semibold">siswa123</span>. Untuk mengubah UID kartu NFC/RFID dengan USB Reader, klik tombol edit pada siswa lalu tempelkan kartu ke USB Reader.
+                    Tambahkan akun anggota baru secara manual atau melalui fitur impor CSV/Excel di bawah. Untuk mendaftarkan UID kartu NFC/RFID dengan USB Reader, klik tombol edit pada siswa lalu tempelkan kartu ke USB Reader.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pt-1">

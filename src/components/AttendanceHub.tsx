@@ -21,6 +21,8 @@ import {
   Trash2,
   Upload,
   Usb,
+  Volume2,
+  VolumeX,
   Wifi,
 } from 'lucide-react';
 import type { AttendanceRecord, MonthlyReportRow, StudentProfile } from '../types';
@@ -34,6 +36,11 @@ import {
   sha256Hex,
 } from '../lib/firestoreSync';
 import { formatDateID, formatLocalClock, getLocalTimeZoneLabel } from '../lib/mediaAssets';
+import {
+  announceAttendanceVoice,
+  playAttendanceChime,
+  warmAttendanceVoice,
+} from '../lib/attendanceSound';
 import {
   buildAttendanceWhatsappMessage,
   buildMonthlyReportWhatsappMessage,
@@ -92,6 +99,11 @@ export function AttendanceHub({
   const [scanStatusMode, setScanStatusMode] = useState<'Hadir' | 'Terlambat' | 'Izin' | 'Tanpa Keterangan'>('Hadir');
   const [attendanceMode, setAttendanceMode] = useState<AttendanceMode>('auto');
   const [autoQueueWa, setAutoQueueWa] = useState(true);
+  const [voiceEnabled, setVoiceEnabled] = useState(() =>
+    typeof window !== 'undefined' ? window.localStorage.getItem('nmc_attendance_voice') !== 'off' : true
+  );
+  const voiceEnabledRef = useRef(voiceEnabled);
+  voiceEnabledRef.current = voiceEnabled;
   const [gatewayConfigured, setGatewayConfigured] = useState(false);
   const [copiedWaBanner, setCopiedWaBanner] = useState(false);
 
@@ -104,6 +116,27 @@ export function AttendanceHub({
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const nfcInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    warmAttendanceVoice();
+  }, []);
+
+  const toggleVoiceEnabled = () => {
+    setVoiceEnabled((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('nmc_attendance_voice', next ? 'on' : 'off');
+      }
+      if (next) {
+        warmAttendanceVoice();
+        announceAttendanceVoice({
+          fullName: 'Notifikasi',
+          customPhrase: 'Suara notifikasi absensi diaktifkan',
+        });
+      }
+      return next;
+    });
+  };
 
   // QR Camera Scanner state
   const [qrModeAction, setQrModeAction] = useState<'attendance' | 'profile'>('attendance');
@@ -432,7 +465,17 @@ export function AttendanceHub({
         `${recordedRecord.full_name} (${recordedRecord.kelas}) tercatat ${actionLabel} (${recordedRecord.status}) via ${method}.${waSuffix}`,
         'success'
       );
+      if (voiceEnabledRef.current) {
+        announceAttendanceVoice({
+          fullName: studentName || recordedRecord.full_name,
+          actionType: resolvedActionType,
+          status: recordedRecord.status,
+        });
+      }
     } catch (err) {
+      if (voiceEnabledRef.current) {
+        playAttendanceChime('error');
+      }
       onToast(err instanceof Error ? err.message : 'Kartu / QR tidak dikenali.', 'error');
     }
   };
@@ -1137,12 +1180,27 @@ export function AttendanceHub({
               />
               Siapkan &amp; kirim laporan WhatsApp ke orang tua otomatis saat scan
             </label>
-            <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
-              <MessageCircle className={`w-3.5 h-3.5 ${gatewayConfigured ? 'text-emerald-600' : 'text-slate-400'}`} />
-              {gatewayConfigured
-                ? 'Gateway WA Server Aktif (Auto-Kirim Tanpa Klik)'
-                : 'Mode WA Langsung (1-Klik Kirim via WhatsApp Orang Tua)'}
-            </span>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={toggleVoiceEnabled}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors min-h-[34px] ${
+                  voiceEnabled
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+                title="Aktifkan/nonaktifkan suara notifikasi saat tap kartu atau scan QR"
+              >
+                {voiceEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+                <span>{voiceEnabled ? 'Suara Notifikasi Aktif' : 'Suara Dibisukan'}</span>
+              </button>
+              <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
+                <MessageCircle className={`w-3.5 h-3.5 ${gatewayConfigured ? 'text-emerald-600' : 'text-slate-400'}`} />
+                {gatewayConfigured
+                  ? 'Gateway WA Server Aktif (Auto-Kirim Tanpa Klik)'
+                  : 'Mode WA Langsung (1-Klik Kirim via WhatsApp Orang Tua)'}
+              </span>
+            </div>
           </div>
         </div>
       )}

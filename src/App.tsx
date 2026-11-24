@@ -49,6 +49,7 @@ import {
   syncMemberAuthHashesAdmin,
   syncMissingLmsTasksToFirestore,
   syncMissingMembersToFirestore,
+  removeDefaultSeedMembersFromFirestore,
 } from './lib/firestoreSync';
 
 const PORTAL_MEMBER_STORAGE_KEY = 'mmc_portal_member_username';
@@ -154,6 +155,7 @@ export default function App() {
   const autoSeedAttemptedRef = useRef(false);
   const lmsMissingSyncAttemptedRef = useRef(false);
   const missingMembersSyncSigRef = useRef('');
+  const defaultStudentsCleanupSigRef = useRef('');
   const cloudToLocalSyncSigRef = useRef('');
   const firebaseTokenExchangeAttemptedRef = useRef(false);
   const deletedAttendanceKeysRef = useRef<Set<string>>(new Set());
@@ -683,12 +685,24 @@ export default function App() {
     if (!firebaseAuthReady || !isFirebaseAdmin || firestoreQuotaExceeded) return;
     if (cloudSeeded) {
       syncMemberAuthHashesAdmin().catch(() => {});
+      if (cloudPublicMembers !== null && cloudPublicMembers.length > 0) {
+        const cleanSig = cloudPublicMembers.map((m) => m.username).join('|');
+        if (defaultStudentsCleanupSigRef.current !== cleanSig) {
+          defaultStudentsCleanupSigRef.current = cleanSig;
+          removeDefaultSeedMembersFromFirestore(cloudPublicMembers)
+            .then((deletedCount) => {
+              if (deletedCount > 0) {
+                showToast(`${deletedCount} akun anggota default berhasil dihapus dari Cloud.`, 'info');
+              }
+            })
+            .catch(() => {});
+        }
+      }
       if (localMembers.length > 0) {
-        const hasCloudMembers = cloudPublicMembers !== null && cloudPublicMembers.length > 0;
-        const sig = `${hasCloudMembers ? 'admins' : 'all'}:${localMembers.map((m) => `${m.username}:${m.role}`).join('|')}`;
+        const sig = `admins:${localMembers.map((m) => `${m.username}:${m.role}`).join('|')}`;
         if (missingMembersSyncSigRef.current !== sig) {
           missingMembersSyncSigRef.current = sig;
-          syncMissingMembersToFirestore(localMembers, { adminsOnly: hasCloudMembers }).catch(() => {});
+          syncMissingMembersToFirestore(localMembers, { adminsOnly: true }).catch(() => {});
         }
       }
       if (

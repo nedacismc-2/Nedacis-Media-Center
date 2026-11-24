@@ -53,33 +53,33 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
           role="dialog"
           aria-modal="true"
           aria-label="Selamat datang di Nedacis Media Center"
-          className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#0B132B] text-white overflow-hidden px-6 select-none"
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#8B1111] text-white overflow-hidden px-6 select-none"
         >
-          {/* Subtle architectural hairline grid */}
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 opacity-[0.06]"
-            style={{
-              backgroundImage:
-                'linear-gradient(to right, #E2E8F0 1px, transparent 1px), linear-gradient(to bottom, #E2E8F0 1px, transparent 1px)',
-              backgroundSize: '64px 64px',
-            }}
-          />
-
-          {/* Centered depth vignette */}
+          {/* Centered crimson depth vignette */}
           <div
             aria-hidden="true"
             className="pointer-events-none absolute inset-0"
             style={{
               background:
-                'radial-gradient(circle at 50% 44%, rgba(30, 58, 138, 0.42) 0%, rgba(11, 19, 43, 0.92) 64%)',
+                'radial-gradient(circle at 50% 44%, rgba(220, 38, 38, 0.56) 0%, rgba(105, 11, 11, 0.96) 68%)',
+            }}
+          />
+
+          {/* Crisp thin white square grid lines */}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0"
+            style={{
+              backgroundImage:
+                'linear-gradient(to right, rgba(255, 255, 255, 0.18) 1px, transparent 1px), linear-gradient(to bottom, rgba(255, 255, 255, 0.18) 1px, transparent 1px)',
+              backgroundSize: '48px 48px',
             }}
           />
 
           {/* Perimeter editorial frame */}
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-4 sm:inset-7 border border-white/10 rounded-2xl"
+            className="pointer-events-none absolute inset-4 sm:inset-7 border border-white/25 rounded-2xl"
           />
 
           <div className="relative z-10 flex flex-col items-center text-center max-w-xl w-full">
@@ -106,7 +106,7 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
                   rx="28"
                   stroke="#FACC15"
                   strokeWidth="1.75"
-                  strokeOpacity="0.85"
+                  strokeOpacity="0.92"
                   initial={prefersReducedMotion ? { pathLength: 1 } : { pathLength: 0 }}
                   animate={{ pathLength: 1 }}
                   transition={{ duration: 0.95, ease: [0.16, 1, 0.3, 1] }}
@@ -117,9 +117,9 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
                   width="106"
                   height="106"
                   rx="22"
-                  stroke="#B91C1C"
+                  stroke="#FFFFFF"
                   strokeWidth="1.25"
-                  strokeOpacity="0.9"
+                  strokeOpacity="0.45"
                   initial={prefersReducedMotion ? { pathLength: 1 } : { pathLength: 0 }}
                   animate={{ pathLength: 1 }}
                   transition={{ duration: 0.95, delay: 0.12, ease: [0.16, 1, 0.3, 1] }}
@@ -191,7 +191,7 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
               initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5, delay: 0.25, ease: [0.16, 1, 0.3, 1] }}
-              className="text-xs font-medium tracking-[0.18em] uppercase text-amber-300/90"
+              className="text-xs font-medium tracking-[0.18em] uppercase text-amber-200"
             >
               SMP Negeri 2 Ciamis · Ekstrakurikuler Resmi
             </motion.p>
@@ -212,7 +212,7 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
               initial={prefersReducedMotion ? { scaleX: 1 } : { scaleX: 0 }}
               animate={{ scaleX: 1 }}
               transition={{ duration: 0.55, delay: 0.48, ease: [0.16, 1, 0.3, 1] }}
-              className="mt-5 mb-4 w-24 h-px bg-[#FACC15]/80 origin-center"
+              className="mt-5 mb-4 w-24 h-px bg-[#FACC15]/85 origin-center"
             />
 
             {/* Editorial Subtitle */}
@@ -220,7 +220,7 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
               initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5, delay: 0.52, ease: [0.16, 1, 0.3, 1] }}
-              className="text-sm sm:text-base text-slate-300 max-w-md leading-relaxed"
+              className="text-sm sm:text-base text-rose-100/90 max-w-md leading-relaxed"
             >
               {customBrandSubtitle}Ruang Berkarya, Dokumentasi &amp; Jurnalisme Pelajar
             </motion.p>
@@ -234,7 +234,7 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
             >
               <div
                 aria-hidden="true"
-                className="w-44 h-[2px] bg-white/15 rounded-full overflow-hidden"
+                className="w-44 h-[2px] bg-white/20 rounded-full overflow-hidden"
               >
                 <motion.div
                   initial={prefersReducedMotion ? { scaleX: 1 } : { scaleX: 0 }}
@@ -251,7 +251,7 @@ export function WelcomeScreen({ open, brandName, logoUrl, onComplete }: WelcomeS
               <button
                 type="button"
                 onClick={onComplete}
-                className="inline-flex items-center justify-center gap-2 px-6 py-2.5 min-h-[44px] rounded-xl bg-[#FACC15] hover:bg-[#FDE047] text-slate-950 text-sm font-semibold whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#0B132B]"
+                className="inline-flex items-center justify-center gap-2 px-6 py-2.5 min-h-[44px] rounded-xl bg-[#FACC15] hover:bg-[#FDE047] text-slate-950 text-sm font-semibold whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#8B1111]"
               >
                 <span>Masuk Portal</span>
                 <ArrowRight className="w-4 h-4" />
