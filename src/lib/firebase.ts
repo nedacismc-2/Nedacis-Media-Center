@@ -5,10 +5,30 @@ import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file'] as const;
+
+const configuredDatabaseId =
+  (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId ||
+  'ai-studio-mmcsmpn2ciamis-bc8978d5-dade-425a-839a-4bc4c6ecb4ab';
+
+export const db = getFirestore(app, configuredDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+for (const scope of DRIVE_SCOPES) {
+  googleProvider.addScope(scope);
+}
+
+// Keep Google OAuth access token strictly in memory (never localStorage/sessionStorage)
+let cachedDriveAccessToken: string | null = null;
+
+export function setCachedDriveAccessToken(token: string | null): void {
+  cachedDriveAccessToken = token && token.trim() ? token.trim() : null;
+}
+
+export function getCachedDriveAccessToken(): string | null {
+  return cachedDriveAccessToken;
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -37,8 +57,8 @@ export interface FirestoreErrorInfo {
 }
 
 export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
-export const FIREBASE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
-export const FIRESTORE_QUOTA_UPGRADE_URL = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/databases/${firebaseConfig.firestoreDatabaseId}/data?openUpgradeDialog=true`;
+export const FIREBASE_DATABASE_ID = configuredDatabaseId;
+export const FIRESTORE_QUOTA_UPGRADE_URL = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/databases/${configuredDatabaseId}/data?openUpgradeDialog=true`;
 
 let quotaExceededState = false;
 const quotaListeners = new Set<(exceeded: boolean) => void>();

@@ -1474,7 +1474,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10">
-        {firestoreQuotaExceeded && (
+        {firestoreQuotaExceeded && effectiveIsAdmin && activeTab === 'admin' && (
           <div className="mb-6 p-4 rounded-2xl border border-amber-300 bg-amber-50 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
@@ -1730,6 +1730,10 @@ export default function App() {
                 mode={activeTab === 'persetujuan' ? 'approval' : 'admin'}
                 members={members}
                 siteBranding={siteBranding}
+                news={news}
+                schedules={schedules}
+                works={works}
+                attendanceRecords={attendanceRecords}
                 pendingRefreshKey={pendingRefreshKey}
                 cloudAdminTasks={cloudAdminTasks}
                 cloudPendingWorks={cloudPendingWorks}

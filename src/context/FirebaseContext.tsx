@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import {
+  GoogleAuthProvider,
   onAuthStateChanged,
   signInWithPopup,
   signOut,
@@ -9,11 +10,13 @@ import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firest
 import {
   auth,
   db,
+  getCachedDriveAccessToken,
   googleProvider,
   handleFirestoreError,
   isQuotaExceededError,
   markFirestoreQuotaExceeded,
   OperationType,
+  setCachedDriveAccessToken,
   testConnection,
 } from '../lib/firebase';
 
@@ -25,7 +28,10 @@ interface FirebaseContextValue {
   firebaseOnline: boolean;
   isFirebaseAdmin: boolean;
   cloudPhotoUrl: string;
+  driveAccessToken: string | null;
   signInWithGoogle: () => Promise<FirebaseUser>;
+  connectGoogleDrive: () => Promise<string | null>;
+  clearDriveAccessToken: () => void;
   signOutGoogle: () => Promise<void>;
   updateCloudUserPhoto: (photoUrl: string) => Promise<void>;
 }
@@ -38,6 +44,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const [firebaseOnline, setFirebaseOnline] = useState(true);
   const [isFirebaseAdmin, setIsFirebaseAdmin] = useState(false);
   const [cloudPhotoUrl, setCloudPhotoUrl] = useState('');
+  const [driveAccessToken, setDriveAccessToken] = useState<string | null>(() =>
+    getCachedDriveAccessToken()
+  );
 
   useEffect(() => {
     let active = true;
@@ -53,6 +62,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (!user) {
+        setCachedDriveAccessToken(null);
+        setDriveAccessToken(null);
         setIsFirebaseAdmin(false);
         setCloudPhotoUrl('');
         setFirebaseAuthReady(true);
@@ -127,12 +138,35 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   const signInWithGoogle = async (): Promise<FirebaseUser> => {
     const result = await signInWithPopup(auth, googleProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const accessToken = credential?.accessToken || null;
+    if (accessToken) {
+      setCachedDriveAccessToken(accessToken);
+      setDriveAccessToken(accessToken);
+    }
     setFirebaseOnline(true);
     return result.user;
   };
 
+  const connectGoogleDrive = async (): Promise<string | null> => {
+    const result = await signInWithPopup(auth, googleProvider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const accessToken = credential?.accessToken || null;
+    setCachedDriveAccessToken(accessToken);
+    setDriveAccessToken(accessToken);
+    setFirebaseOnline(true);
+    return accessToken;
+  };
+
+  const clearDriveAccessToken = () => {
+    setCachedDriveAccessToken(null);
+    setDriveAccessToken(null);
+  };
+
   const signOutGoogle = async () => {
     await signOut(auth);
+    setCachedDriveAccessToken(null);
+    setDriveAccessToken(null);
   };
 
   const updateCloudUserPhoto = async (photoUrl: string) => {
@@ -158,7 +192,10 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         firebaseOnline,
         isFirebaseAdmin,
         cloudPhotoUrl,
+        driveAccessToken,
         signInWithGoogle,
+        connectGoogleDrive,
+        clearDriveAccessToken,
         signOutGoogle,
         updateCloudUserPhoto,
       }}

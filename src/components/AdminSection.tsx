@@ -13,16 +13,20 @@ import {
   Download,
   ExternalLink,
   File as FileIcon,
+  FileSpreadsheet,
   FileText,
+  FolderOpen,
   HardDrive,
   Image as ImageIcon,
   LayoutTemplate,
+  LogOut,
   Newspaper,
   Pencil,
   Plus,
   Radio,
   RefreshCw,
   RotateCcw,
+  Save,
   Search,
   ShieldAlert,
   Square,
@@ -31,13 +35,16 @@ import {
   Usb,
   Users,
   Video,
+  X,
   XCircle,
 } from 'lucide-react';
 import type {
   AdminLmsSubmission,
   AdminLmsTask,
+  AttendanceRecord,
   LmsStageType,
   NewsArticle,
+  ScheduleItem,
   SiteBranding,
   SocialLinkItem,
   SocialPlatform,
@@ -81,8 +88,27 @@ import {
 } from '../lib/memberExportImport';
 import { HERO_IMAGE, formatDateID, formatTimeAgo } from '../lib/mediaAssets';
 import { CloudFileAttachment, CloudImage, CloudVideo } from './CloudMedia';
+import { GoogleSignInButton } from './GoogleSignInButton';
 import { NmcLogo } from './NmcLogo';
 import { SocialSilhouetteIcon } from './SocialSilhouetteIcon';
+import {
+  buildAdminDriveSnapshot,
+  deleteGoogleDriveFile,
+  downloadGoogleDriveFileBlob,
+  downloadGoogleDriveJson,
+  ensureNmcAdminDriveFolder,
+  GoogleDriveApiError,
+  listNmcDriveFiles,
+  NMC_DRIVE_FOLDER_NAME,
+  parseAdminBackupSnapshot,
+  saveJsonToGoogleDrive,
+  saveTextToGoogleDrive,
+  uploadAdminFileToGoogleDrive,
+  type DriveAdminFileKind,
+  type GoogleDriveAdminFile,
+  type GoogleDriveFolderInfo,
+  type ParsedAdminBackupPreview,
+} from '../lib/googleDriveAdmin';
 
 export type AdminSubTab = 'students' | 'tasks' | 'review' | 'moderation' | 'news' | 'hero' | 'branding' | 'database';
 
@@ -90,6 +116,10 @@ interface AdminSectionProps {
   mode: 'admin' | 'approval';
   members: StudentProfile[];
   siteBranding: SiteBranding;
+  news?: NewsArticle[];
+  schedules?: ScheduleItem[];
+  works?: StudentWork[];
+  attendanceRecords?: AttendanceRecord[];
   pendingRefreshKey?: number;
   cloudAdminTasks?: AdminLmsTask[];
   cloudPendingWorks?: StudentWork[];
@@ -115,6 +145,10 @@ export function AdminSection({
   mode,
   members,
   siteBranding,
+  news = [],
+  schedules = [],
+  works = [],
+  attendanceRecords = [],
   pendingRefreshKey = 0,
   cloudAdminTasks,
   cloudPendingWorks,
@@ -135,7 +169,13 @@ export function AdminSection({
   onOpenAdminPanel,
   onToast,
 }: AdminSectionProps) {
-  const { signInWithGoogle } = useFirebase();
+  const {
+    firebaseUser,
+    driveAccessToken,
+    signInWithGoogle,
+    connectGoogleDrive,
+    clearDriveAccessToken,
+  } = useFirebase();
   const canWriteCloudAdmin = isPortalAdmin || isFirebaseAdmin;
   const [tab, setTab] = useState<AdminSubTab>(mode === 'approval' ? 'review' : 'students');
   const [syncingCloud, setSyncingCloud] = useState(false);
@@ -147,6 +187,25 @@ export function AdminSection({
   const [confirmDeleteMode, setConfirmDeleteMode] = useState<'none' | 'bulk' | string>('none');
   const [deletingStorageFiles, setDeletingStorageFiles] = useState(false);
   const [connectingGoogleAdmin, setConnectingGoogleAdmin] = useState(false);
+
+  // Google Drive Admin Storage state
+  const [driveFolder, setDriveFolder] = useState<GoogleDriveFolderInfo | null>(null);
+  const [driveFiles, setDriveFiles] = useState<GoogleDriveAdminFile[]>([]);
+  const [loadingDriveFiles, setLoadingDriveFiles] = useState(false);
+  const [driveError, setDriveError] = useState('');
+  const [connectingDrive, setConnectingDrive] = useState(false);
+  const [savingDriveBackup, setSavingDriveBackup] = useState(false);
+  const [savingDriveMembersCsv, setSavingDriveMembersCsv] = useState(false);
+  const [uploadingDriveFile, setUploadingDriveFile] = useState(false);
+  const [processingDriveAction, setProcessingDriveAction] = useState(false);
+  const [driveSearch, setDriveSearch] = useState('');
+  const [driveKindFilter, setDriveKindFilter] = useState<'all' | DriveAdminFileKind>('all');
+  const [driveConfirmModal, setDriveConfirmModal] = useState<
+    | null
+    | { type: 'delete'; file: GoogleDriveAdminFile }
+    | { type: 'overwrite'; file: GoogleDriveAdminFile }
+    | { type: 'restore'; file: GoogleDriveAdminFile; preview: ParsedAdminBackupPreview }
+  >(null);
 
   // Create student state
   const [username, setUsername] = useState('');
@@ -501,6 +560,336 @@ export function AdminSection({
     }
   }, []);
 
+  const handleDriveApiError = useCallback(
+    (err: unknown, fallbackMsg: string) => {
+      if (err instanceof GoogleDriveApiError && err.isAuthError) {
+        clearDriveAccessToken();
+        setDriveError(err.message);
+        onToast(err.message, 'error');
+        return;
+      }
+      const msg = err instanceof Error ? err.message : fallbackMsg;
+      setDriveError(msg);
+      onToast(msg, 'error');
+    },
+    [clearDriveAccessToken, onToast]
+  );
+
+  const loadGoogleDriveStorage = useCallback(
+    async (explicitToken?: string | null) => {
+      const tokenToUse = explicitToken ?? driveAccessToken;
+      if (!tokenToUse) {
+        setDriveFolder(null);
+        setDriveFiles([]);
+        return;
+      }
+      setLoadingDriveFiles(true);
+      setDriveError('');
+      try {
+        const folder = await ensureNmcAdminDriveFolder(tokenToUse);
+        setDriveFolder(folder);
+        const files = await listNmcDriveFiles(tokenToUse, folder.id);
+        setDriveFiles(files);
+      } catch (err) {
+        handleDriveApiError(err, 'Gagal memuat folder Google Drive admin.');
+      } finally {
+        setLoadingDriveFiles(false);
+      }
+    },
+    [driveAccessToken, handleDriveApiError]
+  );
+
+  const handleConnectGoogleDrive = async () => {
+    setConnectingDrive(true);
+    setDriveError('');
+    try {
+      const token = await connectGoogleDrive();
+      if (!token) {
+        throw new Error(
+          'Token akses Google Drive tidak diterima. Silakan coba masuk kembali dan centang izin Google Drive.'
+        );
+      }
+      onToast('Google Drive berhasil terhubung untuk penyimpanan data admin.', 'success');
+      await loadGoogleDriveStorage(token);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal menghubungkan Google Drive.';
+      setDriveError(msg);
+      onToast(msg, 'error');
+    } finally {
+      setConnectingDrive(false);
+    }
+  };
+
+  const buildCurrentAdminSnapshot = useCallback(async () => {
+    let sqliteExport: Record<string, unknown> | undefined;
+    const localToken = getStoredToken();
+    if (localToken) {
+      try {
+        const res = await fetch('/api/admin/database/export-json', {
+          headers: { Authorization: `Bearer ${localToken}` },
+        });
+        if (res.ok) {
+          sqliteExport = (await res.json()) as Record<string, unknown>;
+        }
+      } catch {
+        // Optional SQLite export; Cloud/portal snapshot still succeeds cleanly
+      }
+    }
+    return buildAdminDriveSnapshot({
+      siteSettings: siteBranding,
+      members,
+      news,
+      schedules,
+      works,
+      attendance: attendanceRecords,
+      lmsTasks: adminTasks,
+      sqliteExport,
+    });
+  }, [siteBranding, members, news, schedules, works, attendanceRecords, adminTasks]);
+
+  const handleSaveAdminSnapshotToDrive = async (existingFile?: GoogleDriveAdminFile) => {
+    if (!driveAccessToken) {
+      onToast('Hubungkan Google Drive terlebih dahulu.', 'error');
+      return;
+    }
+    setSavingDriveBackup(true);
+    setDriveError('');
+    try {
+      const folder = driveFolder || (await ensureNmcAdminDriveFolder(driveAccessToken));
+      if (!driveFolder) setDriveFolder(folder);
+
+      const snapshot = await buildCurrentAdminSnapshot();
+      const nowStamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16);
+      const fileName = existingFile?.name || `nmc_admin_backup_${nowStamp}.json`;
+
+      await saveJsonToGoogleDrive(driveAccessToken, folder.id, {
+        fileName,
+        data: snapshot,
+        description: `Backup lengkap data admin NMC SMPN 2 Ciamis (${members.length} akun, ${works.length} karya, ${attendanceRecords.length} absensi).`,
+        kind: 'backup',
+        existingFileId: existingFile?.id,
+      });
+
+      await loadGoogleDriveStorage(driveAccessToken);
+      onToast(
+        existingFile
+          ? `File backup "${fileName}" di Google Drive berhasil diperbarui.`
+          : `Backup lengkap admin "${fileName}" berhasil disimpan ke Google Drive.`,
+        'success'
+      );
+    } catch (err) {
+      handleDriveApiError(err, 'Gagal menyimpan backup admin ke Google Drive.');
+    } finally {
+      setSavingDriveBackup(false);
+    }
+  };
+
+  const handleSaveMembersCsvToDrive = async () => {
+    if (!driveAccessToken) {
+      onToast('Hubungkan Google Drive terlebih dahulu.', 'error');
+      return;
+    }
+    setSavingDriveMembersCsv(true);
+    setDriveError('');
+    try {
+      const folder = driveFolder || (await ensureNmcAdminDriveFolder(driveAccessToken));
+      if (!driveFolder) setDriveFolder(folder);
+
+      const csvContent = buildMembersCsv(members);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const fileName = `nmc_data_anggota_${stamp}.csv`;
+
+      await saveTextToGoogleDrive(driveAccessToken, folder.id, {
+        fileName,
+        mimeType: 'text/csv',
+        text: csvContent,
+        description: `Arsip data ${members.length} anggota & pembina NMC SMPN 2 Ciamis (CSV).`,
+        kind: 'members',
+      });
+
+      await loadGoogleDriveStorage(driveAccessToken);
+      onToast(`Data anggota (${members.length} akun) berhasil disimpan ke Google Drive.`, 'success');
+    } catch (err) {
+      handleDriveApiError(err, 'Gagal menyimpan arsip anggota ke Google Drive.');
+    } finally {
+      setSavingDriveMembersCsv(false);
+    }
+  };
+
+  const handleUploadFileToDrive = async (file: File | undefined) => {
+    if (!file) return;
+    if (!driveAccessToken) {
+      onToast('Hubungkan Google Drive terlebih dahulu.', 'error');
+      return;
+    }
+    setUploadingDriveFile(true);
+    setDriveError('');
+    try {
+      const folder = driveFolder || (await ensureNmcAdminDriveFolder(driveAccessToken));
+      if (!driveFolder) setDriveFolder(folder);
+
+      await uploadAdminFileToGoogleDrive(driveAccessToken, folder.id, {
+        file,
+        description: `Dokumen / media admin NMC SMPN 2 Ciamis (${file.name}).`,
+      });
+      await loadGoogleDriveStorage(driveAccessToken);
+      onToast(`File "${file.name}" berhasil diunggah ke folder Google Drive admin.`, 'success');
+    } catch (err) {
+      handleDriveApiError(err, 'Gagal mengunggah file ke Google Drive.');
+    } finally {
+      setUploadingDriveFile(false);
+    }
+  };
+
+  const handleDownloadDriveFile = async (file: GoogleDriveAdminFile) => {
+    if (!driveAccessToken) {
+      onToast('Hubungkan Google Drive terlebih dahulu.', 'error');
+      return;
+    }
+    try {
+      const blob = await downloadGoogleDriveFileBlob(driveAccessToken, file.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      onToast(`File "${file.name}" berhasil diunduh dari Google Drive.`, 'success');
+    } catch (err) {
+      handleDriveApiError(err, 'Gagal mengunduh file dari Google Drive.');
+    }
+  };
+
+  const handlePrepareRestoreFromDrive = async (file: GoogleDriveAdminFile) => {
+    if (!driveAccessToken) {
+      onToast('Hubungkan Google Drive terlebih dahulu.', 'error');
+      return;
+    }
+    setProcessingDriveAction(true);
+    try {
+      const json = await downloadGoogleDriveJson(driveAccessToken, file.id);
+      const preview = parseAdminBackupSnapshot(json);
+      setDriveConfirmModal({ type: 'restore', file, preview });
+    } catch (err) {
+      handleDriveApiError(err, 'Gagal membaca isi backup dari Google Drive.');
+    } finally {
+      setProcessingDriveAction(false);
+    }
+  };
+
+  const handleExecuteConfirmedDriveAction = async () => {
+    if (!driveConfirmModal || !driveAccessToken) return;
+    setProcessingDriveAction(true);
+    try {
+      if (driveConfirmModal.type === 'delete') {
+        const target = driveConfirmModal.file;
+        await deleteGoogleDriveFile(driveAccessToken, target.id);
+        setDriveFiles((prev) => prev.filter((f) => f.id !== target.id));
+        setDriveConfirmModal(null);
+        onToast(`File "${target.name}" berhasil dihapus dari Google Drive.`, 'success');
+      } else if (driveConfirmModal.type === 'overwrite') {
+        const target = driveConfirmModal.file;
+        setDriveConfirmModal(null);
+        await handleSaveAdminSnapshotToDrive(target);
+      } else if (driveConfirmModal.type === 'restore') {
+        const { file, preview } = driveConfirmModal;
+        const canSyncCloud = Boolean(auth.currentUser && isFirebaseAdmin);
+        const hasLocalToken = Boolean(getStoredToken());
+        if (!canSyncCloud && !hasLocalToken) {
+          throw new Error(
+            'Masuk sebagai Admin Google atau Admin Portal lokal untuk memulihkan data backup.'
+          );
+        }
+
+        let restoredMembersCount = 0;
+        if (preview.members.length > 0) {
+          const rows = preview.members.map((m) => ({
+            username: m.username,
+            role: m.role,
+            full_name: m.full_name,
+            nis: m.nis,
+            kelas: m.kelas,
+            division: m.division,
+            bio: m.bio,
+            nfc_uid: m.nfc_uid,
+            qr_code_token: m.qr_code_token,
+            parent_whatsapp: m.parent_whatsapp,
+            avatar_color: m.avatar_color,
+            show_in_members: m.show_in_members !== 0,
+          }));
+
+          if (canSyncCloud) {
+            const cloudRes = await importStudentsToFirestore(rows, {
+              overwrite: true,
+              existingMembers: members,
+            });
+            restoredMembersCount = cloudRes.created + cloudRes.updated;
+          }
+          if (hasLocalToken) {
+            const localRes = await apiFetch<{ created: number; updated: number }>(
+              '/api/admin/students/import',
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  students: rows,
+                  overwrite: true,
+                  cloud_synced: canSyncCloud,
+                }),
+              }
+            ).catch(() => null);
+            if (localRes && !canSyncCloud) {
+              restoredMembersCount = localRes.created + localRes.updated;
+            }
+          }
+        }
+
+        if (preview.siteSettings) {
+          if (canSyncCloud) {
+            await saveSiteSettingsToFirestore(preview.siteSettings);
+          }
+          if (hasLocalToken) {
+            await apiFetch('/api/admin/site-logo', {
+              method: 'POST',
+              body: JSON.stringify({
+                brandName: preview.siteSettings.brandName,
+                footerAddress: preview.siteSettings.footerAddress || '',
+              }),
+            }).catch(() => {});
+          }
+          onBrandingUpdated(preview.siteSettings);
+        }
+
+        setDriveConfirmModal(null);
+        onMembersChanged();
+        onToast(
+          `Backup "${file.name}" berhasil dipulihkan (${restoredMembersCount} akun${
+            preview.siteSettings ? ' + pengaturan situs' : ''
+          }).`,
+          'success'
+        );
+      }
+    } catch (err) {
+      handleDriveApiError(err, 'Gagal memproses operasi Google Drive.');
+    } finally {
+      setProcessingDriveAction(false);
+    }
+  };
+
+  const filteredDriveFiles = useMemo(() => {
+    const q = driveSearch.trim().toLowerCase();
+    return driveFiles.filter((f) => {
+      if (driveKindFilter !== 'all' && f.kind !== driveKindFilter) return false;
+      if (!q) return true;
+      return (
+        f.name.toLowerCase().includes(q) ||
+        f.mimeType.toLowerCase().includes(q) ||
+        (f.description || '').toLowerCase().includes(q)
+      );
+    });
+  }, [driveFiles, driveSearch, driveKindFilter]);
+
   useEffect(() => {
     loadPendingWorks();
   }, [loadPendingWorks, pendingRefreshKey, mode, tab]);
@@ -510,8 +899,11 @@ export function AdminSection({
       loadAdminTasks();
     } else if (activeSubTab === 'database') {
       loadDbHealth();
+      if (driveAccessToken) {
+        void loadGoogleDriveStorage(driveAccessToken);
+      }
     }
-  }, [activeSubTab, loadAdminTasks, loadDbHealth]);
+  }, [activeSubTab, loadAdminTasks, loadDbHealth, driveAccessToken, loadGoogleDriveStorage]);
 
   useEffect(() => {
     if (activeSubTab !== 'moderation') return;
@@ -1721,7 +2113,7 @@ export function AdminSection({
           Panel Admin &amp; Pembina NMC
         </h1>
         <p className="text-sm text-slate-600 mt-1 max-w-2xl">
-          Kelola 20 akun siswa, pembina, dan kartu NFC, tinjau persetujuan karya anggota, pantau kapasitas penyimpanan Firebase, serta atur liputan dan tampilan portal.
+          Kelola akun siswa, pembina, dan kartu NFC, tinjau persetujuan karya anggota, pantau penyimpanan Firebase &amp; Google Drive, serta atur liputan dan tampilan portal.
         </p>
       </div>
 
@@ -1787,7 +2179,7 @@ export function AdminSection({
             }`}
           >
             <Users className="w-4 h-4" />
-            Akun Siswa ({studentMembers.length}/20)
+            Akun Siswa ({studentMembers.length})
           </button>
           <button
             type="button"
@@ -3642,6 +4034,317 @@ export function AdminSection({
 
           {tab === 'database' && (
             <div className="space-y-6">
+              {/* Google Drive Admin Data Storage (Companion to Firebase) */}
+              <div className="border border-blue-200 rounded-2xl p-5 sm:p-6 space-y-5 bg-gradient-to-br from-white via-blue-50/30 to-white">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-blue-100 pb-4">
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <FolderOpen className="w-4 h-4 text-[#1D4ED8]" />
+                      <h3 className="text-base font-semibold text-slate-900">
+                        Penyimpanan Data Admin Google Drive (Pendamping Firebase)
+                      </h3>
+                      <span
+                        className={`px-2.5 py-0.5 text-[11px] font-semibold rounded-full ${
+                          driveAccessToken
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {driveAccessToken ? 'Terhubung' : 'Belum Terhubung'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-600 max-w-3xl">
+                      Simpan cadangan lengkap data portal admin (.json), arsip data anggota (.csv), dan dokumen atau media admin langsung ke Google Drive Anda di folder{' '}
+                      <span className="font-mono font-semibold text-slate-800">{NMC_DRIVE_FOLDER_NAME}</span>{' '}
+                      sebagai penyimpanan tambahan selain Firebase.
+                    </p>
+                  </div>
+
+                  {driveAccessToken ? (
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {driveFolder?.webViewLink && (
+                        <a
+                          href={driveFolder.webViewLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#1D4ED8] bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-xl"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          Buka Folder Drive
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        disabled={loadingDriveFiles}
+                        onClick={() => void loadGoogleDriveStorage(driveAccessToken)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl disabled:opacity-60"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${loadingDriveFiles ? 'animate-spin' : ''}`} />
+                        Muat Ulang
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearDriveAccessToken();
+                          setDriveFolder(null);
+                          setDriveFiles([]);
+                          setDriveError('');
+                          onToast('Sesi Google Drive diputuskan untuk tab ini.', 'info');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-600 hover:text-rose-700 bg-white hover:bg-rose-50 border border-slate-200 rounded-xl"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        Putuskan Sesi
+                      </button>
+                    </div>
+                  ) : (
+                    <GoogleSignInButton
+                      label={connectingDrive ? 'Menghubungkan...' : 'Sign in with Google'}
+                      disabled={connectingDrive}
+                      onClick={handleConnectGoogleDrive}
+                      className="self-start lg:self-auto shrink-0"
+                    />
+                  )}
+                </div>
+
+                {driveError && (
+                  <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                      <span>{driveError}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setDriveError('')}
+                      className="text-rose-600 hover:text-rose-800 shrink-0"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+
+                {!driveAccessToken ? (
+                  <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-slate-900">
+                        Hubungkan Akun Google Anda untuk Penyimpanan Drive
+                      </p>
+                      <p className="text-xs text-slate-600">
+                        {firebaseUser?.email
+                          ? `Akun aktif: ${firebaseUser.email}. Klik tombol Sign in with Google untuk mengaktifkan akses penyimpanan folder Google Drive pada sesi ini.`
+                          : 'Masuk dengan akun Google untuk menyimpan backup portal, arsip CSV anggota, dan dokumen admin langsung ke Google Drive.'}
+                      </p>
+                    </div>
+                    <GoogleSignInButton
+                      label={connectingDrive ? 'Menghubungkan...' : 'Hubungkan Google Drive'}
+                      disabled={connectingDrive}
+                      onClick={handleConnectGoogleDrive}
+                      className="shrink-0"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    {/* Quick Save & Upload Actions */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <button
+                        type="button"
+                        disabled={savingDriveBackup}
+                        onClick={() => void handleSaveAdminSnapshotToDrive()}
+                        className="flex items-center justify-center gap-2 px-4 py-3 text-xs sm:text-sm font-semibold text-white bg-[#1D4ED8] hover:bg-[#1E40AF] disabled:opacity-60 rounded-xl shadow-xs"
+                      >
+                        <Save className="w-4 h-4" />
+                        {savingDriveBackup ? 'Menyimpan Backup...' : 'Simpan Backup Admin (.json)'}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={savingDriveMembersCsv}
+                        onClick={() => void handleSaveMembersCsvToDrive()}
+                        className="flex items-center justify-center gap-2 px-4 py-3 text-xs sm:text-sm font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 disabled:opacity-60 rounded-xl"
+                      >
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+                        {savingDriveMembersCsv
+                          ? 'Menyimpan CSV...'
+                          : `Simpan Data Anggota CSV (${members.length})`}
+                      </button>
+
+                      <label
+                        className={`flex items-center justify-center gap-2 px-4 py-3 text-xs sm:text-sm font-semibold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl cursor-pointer ${
+                          uploadingDriveFile ? 'opacity-60 pointer-events-none' : ''
+                        }`}
+                      >
+                        <UploadCloud className="w-4 h-4 text-[#B91C1C]" />
+                        <span>
+                          {uploadingDriveFile ? 'Mengunggah File...' : 'Upload File / Dokumen ke Drive'}
+                        </span>
+                        <input
+                          type="file"
+                          className="hidden"
+                          disabled={uploadingDriveFile}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            void handleUploadFileToDrive(f);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    {/* Search & Filter Drive Files */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="relative flex-1">
+                        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={driveSearch}
+                          onChange={(e) => setDriveSearch(e.target.value)}
+                          placeholder="Cari file backup atau dokumen di Google Drive..."
+                          className="w-full pl-9 pr-3 py-2 text-xs sm:text-sm border border-slate-300 rounded-xl bg-white focus:outline-none focus:border-[#1D4ED8]"
+                        />
+                      </div>
+                      <select
+                        value={driveKindFilter}
+                        onChange={(e) => setDriveKindFilter(e.target.value as 'all' | DriveAdminFileKind)}
+                        className="px-3 py-2 text-xs sm:text-sm bg-white border border-slate-300 rounded-xl"
+                      >
+                        <option value="all">Semua File ({driveFiles.length})</option>
+                        <option value="backup">Backup Portal (.json)</option>
+                        <option value="members">Arsip Anggota (.csv)</option>
+                        <option value="document">Dokumen Admin</option>
+                        <option value="media">Media (Foto/Video)</option>
+                      </select>
+                    </div>
+
+                    {/* Drive Files List */}
+                    {loadingDriveFiles ? (
+                      <div className="p-8 text-center text-xs sm:text-sm text-slate-500 border border-slate-200 rounded-xl bg-white">
+                        Memuat daftar file dari Google Drive...
+                      </div>
+                    ) : filteredDriveFiles.length === 0 ? (
+                      <div className="p-8 text-center text-xs sm:text-sm text-slate-500 border border-slate-200 rounded-xl bg-white">
+                        {driveFiles.length === 0
+                          ? `Belum ada file di folder "${NMC_DRIVE_FOLDER_NAME}". Klik tombol Simpan Backup Admin atau Upload File di atas.`
+                          : 'Tidak ada file Google Drive yang cocok dengan pencarian.'}
+                      </div>
+                    ) : (
+                      <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 bg-white max-h-[380px] overflow-y-auto">
+                        {filteredDriveFiles.map((file) => {
+                          const isJsonBackup =
+                            file.kind === 'backup' ||
+                            file.name.toLowerCase().endsWith('.json') ||
+                            file.mimeType === 'application/json';
+                          const badgeStyle =
+                            file.kind === 'backup'
+                              ? 'bg-blue-100 text-blue-800'
+                              : file.kind === 'members'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : file.kind === 'media'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-slate-100 text-slate-700';
+                          const badgeLabel =
+                            file.kind === 'backup'
+                              ? 'Backup Portal'
+                              : file.kind === 'members'
+                              ? 'Arsip Anggota'
+                              : file.kind === 'media'
+                              ? 'Media'
+                              : 'Dokumen';
+
+                          return (
+                            <div
+                              key={file.id}
+                              className="p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 hover:bg-slate-50/70 transition-colors"
+                            >
+                              <div className="flex items-start gap-3 min-w-0">
+                                <div className="w-9 h-9 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-[#1D4ED8] shrink-0">
+                                  {file.kind === 'backup' ? (
+                                    <Database className="w-4 h-4" />
+                                  ) : file.kind === 'members' ? (
+                                    <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+                                  ) : file.kind === 'media' ? (
+                                    <ImageIcon className="w-4 h-4 text-amber-700" />
+                                  ) : (
+                                    <FileText className="w-4 h-4 text-slate-600" />
+                                  )}
+                                </div>
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <p className="text-xs sm:text-sm font-medium text-slate-900 truncate">
+                                      {file.name}
+                                    </p>
+                                    <span className={`px-2 py-0.5 text-[10px] font-semibold rounded-full ${badgeStyle}`}>
+                                      {badgeLabel}
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-slate-500 font-mono truncate">
+                                    {formatBytes(file.size)} · Diubah {formatTimeAgo(file.modifiedTime)}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 shrink-0 self-end lg:self-center">
+                                {file.webViewLink && (
+                                  <a
+                                    href={file.webViewLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#1D4ED8] bg-blue-50 hover:bg-blue-100 rounded-lg"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                    Lihat
+                                  </a>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDownloadDriveFile(file)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  Unduh
+                                </button>
+                                {isJsonBackup && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={processingDriveAction || savingDriveBackup}
+                                      onClick={() =>
+                                        setDriveConfirmModal({ type: 'overwrite', file })
+                                      }
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg disabled:opacity-50"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5" />
+                                      Perbarui
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={processingDriveAction}
+                                      onClick={() => void handlePrepareRestoreFromDrive(file)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg disabled:opacity-50"
+                                    >
+                                      <RotateCcw className="w-3.5 h-3.5" />
+                                      Pulihkan
+                                    </button>
+                                  </>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={processingDriveAction}
+                                  onClick={() => setDriveConfirmModal({ type: 'delete', file })}
+                                  title="Hapus file dari Google Drive"
+                                  className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg disabled:opacity-50"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
               {/* Cloud Firestore Storage Quota & Selective File Manager */}
               <div className="border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-5 bg-white">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
@@ -3670,7 +4373,7 @@ export function AdminSection({
                       )}
                     </div>
                     <p className="text-xs text-slate-600">
-                      Memantau seluruh foto, video, dan file tugas LMS yang diunggah ke Cloud Firestore (tidak memakai Google Drive). Pilih file tertentu untuk dihapus bila ruang penyimpanan mulai penuh.
+                      Memantau seluruh foto, video, dan file tugas LMS yang diunggah ke Cloud Firestore. Gunakan panel Google Drive di atas untuk arsip backup tambahan, dan hapus file karya/tugas lama di bawah bila kuota Firebase mulai penuh.
                     </p>
                   </div>
                   {!isFirebaseAdmin && (
@@ -4182,6 +4885,131 @@ export function AdminSection({
           )}
         </div>
       </div>
+
+      {/* Explicit Confirmation Modal for Google Drive Destructive / Mutating Operations */}
+      {driveConfirmModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                    driveConfirmModal.type === 'delete'
+                      ? 'bg-rose-100 text-rose-700'
+                      : driveConfirmModal.type === 'overwrite'
+                      ? 'bg-amber-100 text-amber-800'
+                      : 'bg-emerald-100 text-emerald-800'
+                  }`}
+                >
+                  {driveConfirmModal.type === 'delete' ? (
+                    <Trash2 className="w-4 h-4" />
+                  ) : driveConfirmModal.type === 'overwrite' ? (
+                    <RefreshCw className="w-4 h-4" />
+                  ) : (
+                    <RotateCcw className="w-4 h-4" />
+                  )}
+                </div>
+                <h4 className="text-base font-semibold text-slate-900">
+                  {driveConfirmModal.type === 'delete'
+                    ? 'Hapus File dari Google Drive?'
+                    : driveConfirmModal.type === 'overwrite'
+                    ? 'Timpa File Backup di Google Drive?'
+                    : 'Pulihkan Data dari Backup Google Drive?'}
+                </h4>
+              </div>
+              <button
+                type="button"
+                disabled={processingDriveAction}
+                onClick={() => setDriveConfirmModal(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {driveConfirmModal.type === 'delete' && (
+              <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+                Anda akan menghapus file{' '}
+                <span className="font-semibold text-slate-900 break-all">
+                  &ldquo;{driveConfirmModal.file.name}&rdquo;
+                </span>{' '}
+                secara permanen dari Google Drive. Tindakan ini tidak dapat dibatalkan.
+              </p>
+            )}
+
+            {driveConfirmModal.type === 'overwrite' && (
+              <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+                Isi file{' '}
+                <span className="font-semibold text-slate-900 break-all">
+                  &ldquo;{driveConfirmModal.file.name}&rdquo;
+                </span>{' '}
+                di Google Drive akan ditimpa dengan data portal terbaru ({members.length} akun,{' '}
+                {works.length} karya, {attendanceRecords.length} catatan absensi, dan pengaturan situs).
+              </p>
+            )}
+
+            {driveConfirmModal.type === 'restore' && (
+              <div className="space-y-3 text-xs sm:text-sm text-slate-600">
+                <p>
+                  Backup{' '}
+                  <span className="font-semibold text-slate-900 break-all">
+                    &ldquo;{driveConfirmModal.file.name}&rdquo;
+                  </span>{' '}
+                  akan memulihkan data ke Firebase &amp; Portal lokal:
+                </p>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs font-mono text-slate-700">
+                  <div>• Akun Anggota &amp; Pembina: {driveConfirmModal.preview.members.length} akun</div>
+                  <div>
+                    • Pengaturan Situs:{' '}
+                    {driveConfirmModal.preview.siteSettings ? 'Ya (Logo, Hero, Footer)' : 'Tidak disertakan'}
+                  </div>
+                  {driveConfirmModal.preview.exportedAt && (
+                    <div>• Waktu Backup: {formatDateID(driveConfirmModal.preview.exportedAt)}</div>
+                  )}
+                </div>
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Data anggota dengan username yang sama akan diperbarui sesuai isi file backup ini.
+                </p>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={processingDriveAction}
+                onClick={() => setDriveConfirmModal(null)}
+                className="px-4 py-2 text-xs sm:text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl disabled:opacity-50"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={processingDriveAction}
+                onClick={() => void handleExecuteConfirmedDriveAction()}
+                className={`px-4 py-2 text-xs sm:text-sm font-semibold text-white rounded-xl disabled:opacity-60 ${
+                  driveConfirmModal.type === 'delete'
+                    ? 'bg-rose-600 hover:bg-rose-700'
+                    : driveConfirmModal.type === 'overwrite'
+                    ? 'bg-amber-600 hover:bg-amber-700'
+                    : 'bg-emerald-600 hover:bg-emerald-700'
+                }`}
+              >
+                {processingDriveAction
+                  ? 'Memproses...'
+                  : driveConfirmModal.type === 'delete'
+                  ? 'Ya, Hapus File'
+                  : driveConfirmModal.type === 'overwrite'
+                  ? 'Ya, Perbarui File'
+                  : 'Ya, Pulihkan Data'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
