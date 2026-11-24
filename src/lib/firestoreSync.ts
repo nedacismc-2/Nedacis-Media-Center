@@ -492,11 +492,16 @@ export function subscribeMembersPrivateAdmin(
       const map = new Map<string, { nis: string; nfc_uid: string; parent_whatsapp: string }>();
       for (const docSnap of snap.docs) {
         const d = docSnap.data();
-        map.set(docSnap.id, {
+        const entry = {
           nis: String(d.nis || ''),
           nfc_uid: String(d.nfcUid || ''),
           parent_whatsapp: String(d.parentWhatsapp || ''),
-        });
+        };
+        map.set(docSnap.id, entry);
+        const memberId = String(d.memberId || '').trim();
+        if (memberId && !map.has(memberId)) {
+          map.set(memberId, entry);
+        }
       }
       onData(map);
     },

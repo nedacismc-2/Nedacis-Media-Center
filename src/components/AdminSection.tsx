@@ -636,8 +636,17 @@ export function AdminSection({
     e.preventDefault();
     setCreatingStudent(true);
     try {
-      if (auth.currentUser && isFirebaseAdmin) {
-        const cleanUser = username.trim().toLowerCase();
+      const canSyncCloud = Boolean(auth.currentUser && isFirebaseAdmin);
+      const hasLocalToken = Boolean(getStoredToken());
+      if (!canSyncCloud && !hasLocalToken) {
+        throw new Error('Sesi admin tidak aktif. Silakan masuk ulang sebagai Pembina atau Admin Utama.');
+      }
+
+      const cleanUser = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+      const generatedNfc = (nfcUid.trim() || `04${Date.now().toString(16).slice(-8)}`).toUpperCase();
+      const generatedQr = `NMC-${cleanUser.toUpperCase().slice(0, 8)}`;
+
+      if (canSyncCloud) {
         await saveStudentToFirestore({
           username: cleanUser,
           role: 'student',
@@ -646,29 +655,31 @@ export function AdminSection({
           kelas,
           division,
           bio: `Peserta aktif divisi ${division} Nedacis Media Center SMPN 2 Ciamis.`,
-          nfc_uid: (nfcUid || `04${Date.now().toString(16).slice(-8)}`).toUpperCase(),
-          qr_code_token: `NMC-${cleanUser.toUpperCase().slice(0, 8)}`,
+          nfc_uid: generatedNfc,
+          qr_code_token: generatedQr,
           parent_whatsapp: parentWhatsapp.trim(),
           avatar_color: '#1D4ED8',
           show_in_members: true,
           password: password.trim() || undefined,
         });
       }
-      if (getStoredToken()) {
+      if (hasLocalToken) {
         await apiFetch('/api/admin/students', {
           method: 'POST',
           body: JSON.stringify({
-            username,
+            username: cleanUser,
             password,
             full_name: fullName,
             nis,
             kelas,
             division,
-            nfc_uid: nfcUid || undefined,
+            nfc_uid: generatedNfc,
+            qr_code_token: generatedQr,
             parent_whatsapp: parentWhatsapp.trim() || undefined,
+            cloud_synced: canSyncCloud,
           }),
         }).catch((err) => {
-          if (!auth.currentUser || !isFirebaseAdmin) throw err;
+          if (!canSyncCloud) throw err;
         });
       }
       setUsername('');
@@ -677,7 +688,12 @@ export function AdminSection({
       setNfcUid('');
       setParentWhatsapp('');
       onMembersChanged();
-      onToast('Akun siswa baru berhasil dibuat dan tersimpan di Cloud.', 'success');
+      onToast(
+        canSyncCloud
+          ? 'Akun siswa baru berhasil dibuat dan tersimpan di Cloud.'
+          : 'Akun siswa baru berhasil dibuat dan disinkronkan ke portal Pembina.',
+        'success'
+      );
     } catch (err) {
       onToast(err instanceof Error ? err.message : 'Gagal membuat akun siswa.', 'error');
     } finally {
@@ -709,11 +725,17 @@ export function AdminSection({
     if (editingId === null) return;
     setSavingEdit(true);
     try {
+      const canSyncCloud = Boolean(auth.currentUser && isFirebaseAdmin);
+      const hasLocalToken = Boolean(getStoredToken());
+      if (!canSyncCloud && !hasLocalToken) {
+        throw new Error('Sesi admin tidak aktif. Silakan masuk ulang sebagai Pembina atau Admin Utama.');
+      }
+
       const normalizedEditUname = editUsername.trim().toLowerCase();
       const targetMember =
         members.find((m) => m.id === editingId) ||
         members.find((m) => m.username.trim().toLowerCase() === normalizedEditUname);
-      if (auth.currentUser && isFirebaseAdmin) {
+      if (canSyncCloud) {
         await saveStudentToFirestore({
           memberId: targetMember?.firestoreId,
           legacyId: editingId,
@@ -733,7 +755,7 @@ export function AdminSection({
           password: editPass.trim() || undefined,
         });
       }
-      if (getStoredToken()) {
+      if (hasLocalToken) {
         await apiFetch(`/api/admin/students/${editingId}`, {
           method: 'PATCH',
           body: JSON.stringify({
@@ -751,9 +773,10 @@ export function AdminSection({
             avatar_color: editAvatarColor,
             avatar_url: targetMember?.avatar_url,
             password: editPass || undefined,
+            cloud_synced: canSyncCloud,
           }),
         }).catch((err) => {
-          if (!auth.currentUser || !isFirebaseAdmin) throw err;
+          if (!canSyncCloud) throw err;
         });
       }
       setEditingId(null);
@@ -770,16 +793,22 @@ export function AdminSection({
 
   const handleDeleteStudent = async (student: StudentProfile) => {
     try {
-      if (auth.currentUser && isFirebaseAdmin) {
+      const canSyncCloud = Boolean(auth.currentUser && isFirebaseAdmin);
+      const hasLocalToken = Boolean(getStoredToken());
+      if (!canSyncCloud && !hasLocalToken) {
+        throw new Error('Sesi admin tidak aktif. Silakan masuk ulang sebagai Pembina atau Admin Utama.');
+      }
+
+      if (canSyncCloud) {
         const fId = student.firestoreId || sanitizeDocId(`member_${student.username}`);
         await deleteStudentFromFirestore(fId);
       }
-      if (getStoredToken()) {
+      if (hasLocalToken) {
         await apiFetch(
-          `/api/admin/students/${student.id}?username=${encodeURIComponent(student.username)}`,
+          `/api/admin/students/${student.id}?username=${encodeURIComponent(student.username)}&cloud_synced=${canSyncCloud ? '1' : '0'}`,
           { method: 'DELETE' }
         ).catch((err) => {
-          if (!(auth.currentUser && isFirebaseAdmin)) throw err;
+          if (!canSyncCloud) throw err;
         });
       }
       onMembersChanged();
@@ -911,6 +940,7 @@ export function AdminSection({
           body: JSON.stringify({
             students: payload,
             overwrite: importOverwrite,
+            cloud_synced: canSyncCloud,
           }),
         }).catch((err) => {
           if (!canSyncCloud) throw err;

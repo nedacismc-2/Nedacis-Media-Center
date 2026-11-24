@@ -31,8 +31,10 @@ import { useFirebase } from './context/FirebaseContext';
 import { FIRESTORE_QUOTA_UPGRADE_URL, subscribeQuotaExceeded } from './lib/firebase';
 import { subscribeUploadedFilesAdmin, type CloudStorageSummary } from './lib/cloudFiles';
 import {
+  deleteStudentFromFirestore,
   deterministicNumericId,
   sanitizeDocId,
+  saveStudentToFirestore,
   seedCloudPortalIfEmpty,
   subscribeAttendanceRecords,
   subscribeBlockedWords,
@@ -98,6 +100,10 @@ export default function App() {
   const [localNews, setLocalNews] = useState<NewsArticle[]>([]);
   const [localSchedules, setLocalSchedules] = useState<ScheduleItem[]>([]);
   const [localMembers, setLocalMembers] = useState<StudentProfile[]>([]);
+  const [localAuthUser, setLocalAuthUser] = useState<StudentProfile | null>(null);
+  const [localPendingCloudDeletions, setLocalPendingCloudDeletions] = useState<
+    Array<{ username: string; firestore_id: string }>
+  >([]);
   const [localWorks, setLocalWorks] = useState<StudentWork[]>([]);
   const [localAttendance, setLocalAttendance] = useState<AttendanceRecord[]>([]);
   const [localLmsTasks, setLocalLmsTasks] = useState<LmsTask[]>([]);
@@ -114,6 +120,7 @@ export default function App() {
   const [privateMembersMap, setPrivateMembersMap] = useState<
     Map<string, { nis: string; nfc_uid: string; parent_whatsapp: string }>
   >(() => new Map());
+  const [privateMembersLoaded, setPrivateMembersLoaded] = useState(false);
   const [cloudWorks, setCloudWorks] = useState<StudentWork[] | null>(null);
   const [cloudMyWorks, setCloudMyWorks] = useState<StudentWork[] | null>(null);
   const [cloudAttendance, setCloudAttendance] = useState<AttendanceRecord[] | null>(null);
@@ -157,7 +164,9 @@ export default function App() {
   const missingMembersSyncSigRef = useRef('');
   const defaultStudentsCleanupSigRef = useRef('');
   const cloudToLocalSyncSigRef = useRef('');
-  const firebaseTokenExchangeAttemptedRef = useRef(false);
+  const firebaseAdminExchangedUidRef = useRef('');
+  const firebaseAdminExchangeInFlightRef = useRef(false);
+  const cloudSyncInFlightRef = useRef(false);
   const deletedAttendanceKeysRef = useRef<Set<string>>(new Set());
   const lastStorageAlertStatusRef = useRef<'ok' | 'warning' | 'full'>('ok');
   const [bootstrapReady, setBootstrapReady] = useState(false);
@@ -177,6 +186,7 @@ export default function App() {
         news: NewsArticle[];
         schedules: ScheduleItem[];
         members: StudentProfile[];
+        pendingCloudDeletions?: Array<{ username: string; firestore_id: string }>;
         works: StudentWork[];
         attendance: AttendanceRecord[];
         lmsTasks?: LmsTask[];
@@ -186,6 +196,7 @@ export default function App() {
       const safeNews = Array.isArray(data?.news) ? data.news : [];
       const safeSchedules = Array.isArray(data?.schedules) ? data.schedules : [];
       const safeMembers = Array.isArray(data?.members) ? data.members : [];
+      const safePendingDeletions = Array.isArray(data?.pendingCloudDeletions) ? data.pendingCloudDeletions : [];
       const safeWorks = Array.isArray(data?.works) ? data.works : [];
       const safeAttendance = Array.isArray(data?.attendance) ? data.attendance : [];
       const safeLmsTasks = Array.isArray(data?.lmsTasks) ? data.lmsTasks : [];
@@ -202,6 +213,7 @@ export default function App() {
         setBootstrapReady(true);
       }
 
+      setLocalAuthUser(data?.user ?? null);
       if (data?.user) {
         setCurrentUser(data.user);
       } else if (!localStorage.getItem(PORTAL_MEMBER_STORAGE_KEY)) {
@@ -210,6 +222,7 @@ export default function App() {
       setLocalNews(safeNews);
       setLocalSchedules(safeSchedules);
       setLocalMembers(safeMembers);
+      setLocalPendingCloudDeletions(safePendingDeletions);
       setLocalWorks(safeWorks);
       setLocalAttendance(safeAttendance);
       setLocalLmsTasks(safeLmsTasks);
@@ -345,11 +358,26 @@ export default function App() {
         .filter((lm) => Boolean(lm?.username))
         .map((lm) => [lm.username.trim().toLowerCase(), lm])
     );
+    const pendingDeletionUsernames = new Set(
+      isAdminSessionHint
+        ? localPendingCloudDeletions.map((d) => d.username.trim().toLowerCase()).filter(Boolean)
+        : []
+    );
+    const pendingRenamedOldUsernames = new Set(
+      isAdminSessionHint
+        ? safeLocal
+            .filter((lm) => lm.pending_cloud_sync === 1 && Boolean(lm.previous_username))
+            .map((lm) => lm.previous_username!.trim().toLowerCase())
+        : []
+    );
 
     const dedupedRawMap = new Map<string, StudentProfile>();
     for (const m of safeRaw) {
       const unameKey = (m.username || '').trim().toLowerCase();
       if (!unameKey) continue;
+      if (!isFirebaseAdmin && (pendingDeletionUsernames.has(unameKey) || pendingRenamedOldUsernames.has(unameKey))) {
+        continue;
+      }
       const existing = dedupedRawMap.get(unameKey);
       const canonicalId = sanitizeDocId(`member_${unameKey}`);
       if (!existing || (m.firestoreId === canonicalId && existing.firestoreId !== canonicalId)) {
@@ -363,20 +391,37 @@ export default function App() {
       const unameKey = (m.username || '').trim().toLowerCase();
       seenUsernames.add(unameKey);
       const key = m.firestoreId || sanitizeDocId(`member_${m.username}`);
-      const priv = privateMembersMap.get(key);
+      const canonicalKey = sanitizeDocId(`member_${unameKey}`);
+      const priv = privateMembersMap.get(key) || privateMembersMap.get(canonicalKey);
       const localMatch = isAdminSessionHint ? localByUsername.get(unameKey) : undefined;
+      if (localMatch?.pending_cloud_sync === 1 && !isFirebaseAdmin) {
+        return {
+          ...m,
+          ...localMatch,
+          firestoreId: m.firestoreId,
+          attendance_count: m.attendance_count ?? localMatch.attendance_count,
+          works_count: m.works_count ?? localMatch.works_count,
+          lms_points: m.lms_points ?? localMatch.lms_points,
+        };
+      }
       if (!priv && !localMatch) return m;
       return {
         ...m,
         nis: priv?.nis || localMatch?.nis || m.nis,
         nfc_uid: priv?.nfc_uid || localMatch?.nfc_uid || m.nfc_uid,
-        parent_whatsapp: priv?.parent_whatsapp || localMatch?.parent_whatsapp || m.parent_whatsapp || '',
+        parent_whatsapp:
+          priv !== undefined
+            ? priv.parent_whatsapp
+            : localMatch !== undefined
+            ? localMatch.parent_whatsapp || ''
+            : m.parent_whatsapp || '',
       };
     });
-    if (isAdminSessionHint && cloudSeeded && !cloudAuthoritative) {
+    if (isAdminSessionHint) {
       for (const lm of safeLocal) {
         const unameKey = (lm.username || '').trim().toLowerCase();
-        if (unameKey && !seenUsernames.has(unameKey)) {
+        if (!unameKey || seenUsernames.has(unameKey)) continue;
+        if (lm.pending_cloud_sync === 1 || !cloudAuthoritative) {
           seenUsernames.add(unameKey);
           merged.push(lm);
         }
@@ -396,7 +441,7 @@ export default function App() {
       usedIds.add(candidateId);
       return candidateId === m.id ? m : { ...m, id: candidateId };
     });
-  }, [rawMembers, privateMembersMap, localMembers, isAdminSessionHint, cloudSeeded, cloudPublicMembers]);
+  }, [rawMembers, privateMembersMap, localMembers, localPendingCloudDeletions, isAdminSessionHint, isFirebaseAdmin, cloudSeeded, cloudPublicMembers]);
 
   // Resolve member identity cleanly for both Username+ID sessions and Google Auth sessions
   const resolvedMember = useMemo(() => {
@@ -506,16 +551,20 @@ export default function App() {
 
   // Restore saved cross-device member login from localStorage once cloud members load
   useEffect(() => {
-    if (currentUser) return;
+    if (currentUser || !bootstrapReady) return;
     const savedUsername = localStorage.getItem(PORTAL_MEMBER_STORAGE_KEY);
     if (!savedUsername || members.length === 0) return;
     const restored = members.find(
       (m) => m.username.trim().toLowerCase() === savedUsername.trim().toLowerCase()
     );
-    if (restored) {
-      setCurrentUser(restored);
+    if (!restored) return;
+    // Pembina/Admin accounts require an active Express Bearer token so private fields (NIS, NFC UID, No. WA) & edits stay synced
+    if (restored.role === 'admin' && !token && !isFirebaseAdmin) {
+      localStorage.removeItem(PORTAL_MEMBER_STORAGE_KEY);
+      return;
     }
-  }, [currentUser, members]);
+    setCurrentUser(restored);
+  }, [currentUser, bootstrapReady, members, token, isFirebaseAdmin]);
 
   // Site branding subscription (does not depend on admin role; wait for auth ready to avoid double read)
   useEffect(() => {
@@ -621,6 +670,7 @@ export default function App() {
     if (!firebaseAuthReady) return;
     if (!effectiveIsAdmin) {
       setPrivateMembersMap(new Map());
+      setPrivateMembersLoaded(false);
       setCloudPendingWorks(undefined);
       setCloudBlockedWords(undefined);
       setCloudStorageSummary(null);
@@ -631,13 +681,16 @@ export default function App() {
     const unsubs: Array<() => void> = [];
 
     if (firebaseUser?.uid && isFirebaseAdmin) {
+      setPrivateMembersLoaded(false);
       unsubs.push(
         subscribeMembersPrivateAdmin((map) => {
           setPrivateMembersMap(map);
+          setPrivateMembersLoaded(true);
         })
       );
     } else {
       setPrivateMembersMap(new Map());
+      setPrivateMembersLoaded(false);
     }
 
     unsubs.push(
@@ -748,11 +801,22 @@ export default function App() {
   // Exchange Firebase Google Admin ID token for an Express admin Bearer token so Main Admin & Pembina share SQLite state
   useEffect(() => {
     if (!firebaseAuthReady || !isFirebaseAdmin || !firebaseUser) {
-      firebaseTokenExchangeAttemptedRef.current = false;
+      firebaseAdminExchangedUidRef.current = '';
+      firebaseAdminExchangeInFlightRef.current = false;
       return;
     }
-    if (token || firebaseTokenExchangeAttemptedRef.current) return;
-    firebaseTokenExchangeAttemptedRef.current = true;
+    if (!bootstrapReady) return;
+    if (token && localAuthUser?.username?.toLowerCase() === 'admin') {
+      firebaseAdminExchangedUidRef.current = firebaseUser.uid;
+      return;
+    }
+    if (
+      firebaseAdminExchangedUidRef.current === firebaseUser.uid ||
+      firebaseAdminExchangeInFlightRef.current
+    ) {
+      return;
+    }
+    firebaseAdminExchangeInFlightRef.current = true;
 
     firebaseUser
       .getIdToken()
@@ -764,27 +828,99 @@ export default function App() {
       )
       .then((res) => {
         if (res?.token) {
+          firebaseAdminExchangedUidRef.current = firebaseUser.uid;
+          cloudToLocalSyncSigRef.current = '';
           setStoredToken(res.token);
           setToken(res.token);
+          if (res.user) {
+            setLocalAuthUser(res.user);
+            setCurrentUser(res.user);
+          }
           loadBootstrap();
         }
       })
       .catch(() => {
         // Non-fatal if offline/no backend
+      })
+      .finally(() => {
+        firebaseAdminExchangeInFlightRef.current = false;
       });
-  }, [firebaseAuthReady, isFirebaseAdmin, firebaseUser, token, loadBootstrap]);
+  }, [firebaseAuthReady, isFirebaseAdmin, firebaseUser, bootstrapReady, token, localAuthUser?.username, loadBootstrap]);
 
-  // Mirror Cloud Firestore members & branding into SQLite whenever Main Admin loads or edits Cloud data
+  // Bidirectional Cloud <-> SQLite sync when Main Admin is active:
+  // 1) Push any pending Pembina edits/creations/deletions in SQLite up to Firestore first
+  // 2) Mirror authoritative Cloud Firestore members (including private NIS/NFC/WA) & branding into SQLite
   useEffect(() => {
     if (
       !isFirebaseAdmin ||
       !token ||
+      !bootstrapReady ||
       !cloudSeeded ||
+      !privateMembersLoaded ||
       !Array.isArray(cloudPublicMembers) ||
-      cloudPublicMembers.length === 0
+      cloudPublicMembers.length === 0 ||
+      localAuthUser?.role !== 'admin' ||
+      cloudSyncInFlightRef.current
     ) {
       return;
     }
+
+    const pendingLocalMembers = localMembers.filter((lm) => lm.pending_cloud_sync === 1);
+    if (pendingLocalMembers.length > 0 || localPendingCloudDeletions.length > 0) {
+      cloudSyncInFlightRef.current = true;
+      (async () => {
+        const pushedUsernames: string[] = [];
+        for (const lm of pendingLocalMembers) {
+          const prevKey = (lm.previous_username || '').trim().toLowerCase();
+          const curKey = lm.username.trim().toLowerCase();
+          const existingCloud = cloudPublicMembers.find(
+            (cm) => cm.username.trim().toLowerCase() === (prevKey || curKey)
+          );
+          await saveStudentToFirestore({
+            memberId: existingCloud?.firestoreId || lm.firestoreId || sanitizeDocId(`member_${curKey}`),
+            legacyId: lm.id,
+            username: curKey,
+            role: lm.role,
+            full_name: lm.full_name,
+            nis: lm.nis,
+            kelas: lm.kelas,
+            division: lm.division,
+            bio: lm.bio,
+            nfc_uid: lm.nfc_uid,
+            qr_code_token: lm.qr_code_token,
+            parent_whatsapp: lm.parent_whatsapp || '',
+            avatar_color: lm.avatar_color || '#1D4ED8',
+            avatar_url: lm.avatar_url || '',
+            show_in_members: lm.show_in_members !== 0,
+          });
+          pushedUsernames.push(curKey);
+        }
+
+        const deletedUsernames: string[] = [];
+        for (const del of localPendingCloudDeletions) {
+          const targetCloud = cloudPublicMembers.find(
+            (cm) => cm.username.trim().toLowerCase() === del.username.trim().toLowerCase()
+          );
+          await deleteStudentFromFirestore(targetCloud?.firestoreId || del.firestore_id);
+          deletedUsernames.push(del.username.trim().toLowerCase());
+        }
+
+        await apiFetch('/api/admin/mark-cloud-synced', {
+          method: 'POST',
+          body: JSON.stringify({ usernames: pushedUsernames, deletedUsernames }),
+        });
+        cloudToLocalSyncSigRef.current = '';
+        await loadBootstrap();
+      })()
+        .catch(() => {
+          // Will retry on next state tick if transient
+        })
+        .finally(() => {
+          cloudSyncInFlightRef.current = false;
+        });
+      return;
+    }
+
     const membersPayload = members.map((m) => ({
       username: m.username,
       role: m.role,
@@ -799,6 +935,7 @@ export default function App() {
       avatar_color: m.avatar_color,
       avatar_url: m.avatar_url || '',
       show_in_members: m.show_in_members,
+      auth_hashes: m.auth_hashes || [],
       attendance_count: m.attendance_count,
       works_count: m.works_count,
       lms_points: m.lms_points,
@@ -824,7 +961,20 @@ export default function App() {
       .catch(() => {
         cloudToLocalSyncSigRef.current = '';
       });
-  }, [isFirebaseAdmin, token, cloudSeeded, cloudPublicMembers, members, cloudBranding, loadBootstrap]);
+  }, [
+    isFirebaseAdmin,
+    token,
+    bootstrapReady,
+    cloudSeeded,
+    privateMembersLoaded,
+    cloudPublicMembers,
+    localAuthUser?.role,
+    localMembers,
+    localPendingCloudDeletions,
+    members,
+    cloudBranding,
+    loadBootstrap,
+  ]);
 
   // Keep currentUser synced with live Cloud member changes (e.g. edited/deleted by Main Admin)
   useEffect(() => {
@@ -1169,13 +1319,16 @@ export default function App() {
     await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     await signOutGoogle().catch(() => {});
     localStorage.removeItem(PORTAL_MEMBER_STORAGE_KEY);
+    firebaseAdminExchangedUidRef.current = '';
     setStoredToken(null);
     setToken(null);
+    setLocalAuthUser(null);
     setCurrentUser(null);
     setLocalAttendance([]);
     setLocalLmsTasks((prev) => prev.map((t) => ({ ...t, progress: [], submission: null })));
     setLocalNotifications([]);
     setLocalPendingWorksCount(0);
+    setLocalPendingCloudDeletions([]);
     if (isAdminOnlyTab(activeTab) || activeTab === 'tugas') {
       setActiveTab('beranda');
     }

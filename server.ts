@@ -586,20 +586,40 @@ app.post('/api/auth/login', (req, res) => {
     return;
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username.trim()) as (AuthUser & { password_hash: string }) | undefined;
+  const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username.trim()) as
+    | (AuthUser & { password_hash: string; auth_hashes?: string })
+    | undefined;
   const cleanId = password.trim();
   const swappedId = cleanId.toUpperCase().startsWith('MMC-')
     ? `NMC-${cleanId.slice(4)}`
     : cleanId.toUpperCase().startsWith('NMC-')
     ? `MMC-${cleanId.slice(4)}`
     : cleanId;
+  let cloudHashMatched = false;
+  if (user?.auth_hashes) {
+    try {
+      const parsedHashes = JSON.parse(user.auth_hashes);
+      if (Array.isArray(parsedHashes) && parsedHashes.length > 0) {
+        const lowerHash = crypto.createHash('sha256').update(cleanId.toLowerCase()).digest('hex');
+        const exactHash = crypto.createHash('sha256').update(cleanId).digest('hex');
+        const swappedHash = crypto.createHash('sha256').update(swappedId.toLowerCase()).digest('hex');
+        cloudHashMatched =
+          parsedHashes.includes(lowerHash) ||
+          parsedHashes.includes(exactHash) ||
+          parsedHashes.includes(swappedHash);
+      }
+    } catch {
+      cloudHashMatched = false;
+    }
+  }
   const idMatched =
     Boolean(user) &&
     (verifyPassword(cleanId, user!.password_hash) ||
       (Boolean(user!.qr_code_token) &&
         (user!.qr_code_token.trim().toLowerCase() === cleanId.toLowerCase() ||
           user!.qr_code_token.trim().toLowerCase() === swappedId.toLowerCase())) ||
-      (Boolean(user!.nis) && user!.nis.trim().toLowerCase() === cleanId.toLowerCase()));
+      (Boolean(user!.nis) && user!.nis.trim().toLowerCase() === cleanId.toLowerCase()) ||
+      cloudHashMatched);
 
   if (!user || !idMatched) {
     res.status(401).json({ error: 'Username atau ID Login tidak sesuai.' });
@@ -610,7 +630,7 @@ app.post('/api/auth/login', (req, res) => {
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
   db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expiresAt);
 
-  const { password_hash: _ignored, ...safeUser } = user;
+  const { password_hash: _ignored, auth_hashes: _ignoredHashes, ...safeUser } = user;
   res.json({ token, user: { ...safeUser, lms_points: getUserTotalLmsPoints(user.id) } });
 });
 
@@ -774,6 +794,7 @@ app.get('/api/bootstrap', (req, res) => {
       u.id, u.username, u.role, u.full_name, u.nis, u.kelas, u.division, u.bio,
       u.nfc_uid, u.qr_code_token,
       ${isAdminViewer ? 'u.parent_whatsapp,' : "'' as parent_whatsapp,"}
+      ${isAdminViewer ? 'u.pending_cloud_sync, u.previous_username, u.updated_at,' : "0 as pending_cloud_sync, '' as previous_username, '' as updated_at,"}
       u.avatar_color, u.avatar_url, u.show_in_members, u.created_at,
       (SELECT COUNT(*) FROM attendance_records ar WHERE ar.user_id = u.id AND ar.status IN ('Hadir', 'Terlambat')) as attendance_count,
       (SELECT COUNT(*) FROM works w WHERE w.user_id = u.id AND w.approval_status = 'approved') as works_count,
@@ -782,6 +803,12 @@ app.get('/api/bootstrap', (req, res) => {
     WHERE (u.role = 'student' OR u.show_in_members = 1)
     ORDER BY CASE WHEN u.role = 'admin' THEN 0 ELSE 1 END, u.nis ASC
   `).all();
+  const pendingCloudDeletions = isAdminViewer
+    ? (db.prepare('SELECT username, firestore_id FROM pending_cloud_member_deletions').all() as Array<{
+        username: string;
+        firestore_id: string;
+      }>)
+    : [];
   const works = getEnrichedWorks(user?.id, 'approved');
 
   const attendanceToday =
@@ -800,6 +827,7 @@ app.get('/api/bootstrap', (req, res) => {
     news,
     schedules,
     members,
+    pendingCloudDeletions,
     works,
     attendance: attendanceToday,
     lmsTasks: user ? getLmsTasksForUser(user) : getPublishedLmsTasksPublic(),
@@ -908,7 +936,7 @@ app.post('/api/profile/avatar', requireAuth, upload.single('avatar'), (req: Auth
 // ==================== ADMIN STUDENT MANAGEMENT (20 REGISTERED SEATS) ====================
 
 app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
-  const { username, password, full_name, nis, kelas, division, nfc_uid, parent_whatsapp, bio } = req.body as {
+  const { username, password, full_name, nis, kelas, division, nfc_uid, qr_code_token, parent_whatsapp, bio, cloud_synced } = req.body as {
     username?: string;
     password?: string;
     full_name?: string;
@@ -916,8 +944,10 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
     kelas?: string;
     division?: string;
     nfc_uid?: string;
+    qr_code_token?: string;
     parent_whatsapp?: string;
     bio?: string;
+    cloud_synced?: boolean;
   };
 
   if (!username || !full_name || !nis || !kelas || !division) {
@@ -932,23 +962,28 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
   }
 
   const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
-  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername);
+  const exists = db.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?)').get(cleanUsername);
   if (exists) {
     res.status(409).json({ error: 'Username sudah digunakan oleh siswa lain.' });
     return;
   }
 
   const generatedNfc = (nfc_uid && nfc_uid.trim().toUpperCase()) || `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-  const generatedQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const generatedQr =
+    (qr_code_token && qr_code_token.trim().toUpperCase()) ||
+    `NMC-${cleanUsername.toUpperCase().slice(0, 8)}`;
+  const dupQr = db.prepare('SELECT id FROM users WHERE UPPER(qr_code_token) = UPPER(?)').get(generatedQr);
+  const finalQr = dupQr ? `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}` : generatedQr;
   const cleanParentWa = normalizeWhatsappServer(parent_whatsapp) || (parent_whatsapp || '').trim().slice(0, 30);
   const colors = ['#1D4ED8', '#0F766E', '#B45309', '#BE123C', '#4338CA', '#0369A1'];
   const avatarColor = colors[studentCount % colors.length];
   const now = new Date().toISOString();
+  const pendingCloudSync = cloud_synced ? 0 : 1;
 
   try {
     const info = db.prepare(`
-      INSERT INTO users (username, password_hash, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, created_at)
-      VALUES (?, ?, 'student', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (username, password_hash, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, show_in_members, pending_cloud_sync, updated_at, created_at)
+      VALUES (?, ?, 'student', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     `).run(
       cleanUsername,
       hashPassword(password?.trim() || 'siswa123'),
@@ -958,14 +993,17 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
       division,
       bio?.trim() || `Anggota aktif Divisi ${division} NMC SMPN 2 Ciamis.`,
       generatedNfc,
-      generatedQr,
+      finalQr,
       cleanParentWa,
       avatarColor,
+      pendingCloudSync,
+      now,
       now
     );
+    db.prepare('DELETE FROM pending_cloud_member_deletions WHERE LOWER(username) = LOWER(?)').run(cleanUsername);
 
     const created = db.prepare(`
-      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, created_at
+      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, pending_cloud_sync, previous_username, updated_at, created_at
       FROM users WHERE id = ?
     `).get(info.lastInsertRowid);
     checkpointDatabase('PASSIVE');
@@ -977,7 +1015,7 @@ app.post('/api/admin/students', requireAdmin, (req: AuthedRequest, res) => {
 });
 
 app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) => {
-  const { students, overwrite } = req.body as {
+  const { students, overwrite, cloud_synced } = req.body as {
     students?: Array<{
       username?: string;
       role?: string;
@@ -994,6 +1032,7 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
       password?: string;
     }>;
     overwrite?: boolean;
+    cloud_synced?: boolean;
   };
 
   if (!Array.isArray(students) || students.length === 0) {
@@ -1002,6 +1041,7 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
   }
 
   const allowOverwrite = Boolean(overwrite);
+  const pendingCloudSync = cloud_synced ? 0 : 1;
   const colors = ['#1D4ED8', '#0F766E', '#B45309', '#BE123C', '#4338CA', '#0369A1'];
   const now = new Date().toISOString();
 
@@ -1094,7 +1134,9 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
           db.prepare(`
             UPDATE users
             SET role = ?, full_name = ?, nis = ?, kelas = ?, division = ?, bio = ?,
-                nfc_uid = ?, qr_code_token = ?, parent_whatsapp = ?, avatar_color = ?, show_in_members = ?
+                nfc_uid = ?, qr_code_token = ?, parent_whatsapp = ?, avatar_color = ?, show_in_members = ?,
+                pending_cloud_sync = CASE WHEN ? = 1 THEN 1 ELSE pending_cloud_sync END,
+                updated_at = ?
             WHERE id = ?
           `).run(
             role,
@@ -1108,6 +1150,8 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
             nextParentWa,
             avatarColor,
             showInMembers,
+            pendingCloudSync,
+            now,
             existing.id
           );
 
@@ -1117,6 +1161,7 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
               existing.id
             );
           }
+          db.prepare('DELETE FROM pending_cloud_member_deletions WHERE LOWER(username) = LOWER(?)').run(cleanUsername);
 
           updated++;
         } else {
@@ -1158,9 +1203,9 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
           db.prepare(`
             INSERT INTO users (
               username, password_hash, role, full_name, nis, kelas, division, bio,
-              nfc_uid, qr_code_token, parent_whatsapp, avatar_color, show_in_members, created_at
+              nfc_uid, qr_code_token, parent_whatsapp, avatar_color, show_in_members, pending_cloud_sync, updated_at, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             cleanUsername,
             hashPassword(rawPass),
@@ -1175,8 +1220,11 @@ app.post('/api/admin/students/import', requireAdmin, (req: AuthedRequest, res) =
             nextParentWa,
             avatarColor,
             showInMembers,
+            pendingCloudSync,
+            now,
             now
           );
+          db.prepare('DELETE FROM pending_cloud_member_deletions WHERE LOWER(username) = LOWER(?)').run(cleanUsername);
 
           created++;
         }
@@ -1209,6 +1257,7 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     avatar_url,
     show_in_members,
     password,
+    cloud_synced,
   } = req.body as {
     full_name?: string;
     username?: string;
@@ -1225,16 +1274,19 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
     avatar_url?: string;
     show_in_members?: boolean | number;
     password?: string;
+    cloud_synced?: boolean;
   };
 
   let existing = Number.isFinite(paramId)
-    ? (db.prepare('SELECT * FROM users WHERE id = ? AND (role = ? OR show_in_members = 1)').get(paramId, 'student') as AuthUser | undefined)
+    ? (db.prepare('SELECT * FROM users WHERE id = ? AND (role = ? OR show_in_members = 1)').get(paramId, 'student') as
+        | (AuthUser & { previous_username?: string })
+        | undefined)
     : undefined;
   const lookupUsername = (original_username || username || '').trim();
   if (!existing && lookupUsername) {
     existing = db
       .prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND (role = ? OR show_in_members = 1)')
-      .get(lookupUsername, 'student') as AuthUser | undefined;
+      .get(lookupUsername, 'student') as (AuthUser & { previous_username?: string }) | undefined;
   }
   if (!existing) {
     res.status(404).json({ error: 'Anggota tidak ditemukan.' });
@@ -1277,8 +1329,18 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
       }
     }
 
+    const now = new Date().toISOString();
+    const pendingCloudSync = cloud_synced ? 0 : 1;
+
     db.transaction(() => {
-      if (cleanUsername !== null) {
+      if (cleanUsername !== null && cleanUsername !== existing!.username.toLowerCase()) {
+        const prevName = existing!.previous_username?.trim() || existing!.username;
+        db.prepare('UPDATE users SET username = ?, previous_username = ? WHERE id = ?').run(
+          cleanUsername,
+          cloud_synced ? '' : prevName,
+          id
+        );
+      } else if (cleanUsername !== null) {
         db.prepare('UPDATE users SET username = ? WHERE id = ?').run(cleanUsername, id);
       }
       if ((role === 'admin' || role === 'student') && existing!.username.toLowerCase() !== 'admin') {
@@ -1322,13 +1384,21 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
       if (password && password.trim().length >= 4) {
         db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(password.trim()), id);
       }
+      db.prepare('UPDATE users SET pending_cloud_sync = ?, updated_at = ? WHERE id = ?').run(
+        pendingCloudSync,
+        now,
+        id
+      );
+      if (cloud_synced) {
+        db.prepare('UPDATE users SET previous_username = ? WHERE id = ?').run('', id);
+      }
     })();
 
     checkpointDatabase('PASSIVE');
     broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
 
     const updated = db.prepare(`
-      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, created_at
+      SELECT id, username, role, full_name, nis, kelas, division, bio, nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, pending_cloud_sync, previous_username, updated_at, created_at
       FROM users WHERE id = ?
     `).get(id) as AuthUser;
     res.json({ student: { ...updated, lms_points: getUserTotalLmsPoints(id) } });
@@ -1340,16 +1410,59 @@ app.patch('/api/admin/students/:id', requireAdmin, (req, res) => {
 app.delete('/api/admin/students/:id', requireAdmin, (req, res) => {
   const id = Number(req.params.id);
   const queryUsername = typeof req.query.username === 'string' ? req.query.username.trim() : '';
-  let info = Number.isFinite(id)
-    ? db.prepare('DELETE FROM users WHERE id = ? AND role = ?').run(id, 'student')
-    : { changes: 0 };
-  if (info.changes === 0 && queryUsername) {
-    info = db.prepare('DELETE FROM users WHERE LOWER(username) = LOWER(?) AND role = ?').run(queryUsername, 'student');
+  const cloudSynced = req.query.cloud_synced === '1';
+
+  let target = Number.isFinite(id)
+    ? (db.prepare('SELECT id, username FROM users WHERE id = ? AND role = ?').get(id, 'student') as
+        | { id: number; username: string }
+        | undefined)
+    : undefined;
+  if (!target && queryUsername) {
+    target = db
+      .prepare('SELECT id, username FROM users WHERE LOWER(username) = LOWER(?) AND role = ?')
+      .get(queryUsername, 'student') as { id: number; username: string } | undefined;
   }
-  if (info.changes === 0) {
+  if (!target) {
     res.status(404).json({ error: 'Akun siswa tidak ditemukan.' });
     return;
   }
+
+  db.prepare('DELETE FROM users WHERE id = ?').run(target.id);
+  if (!cloudSynced) {
+    db.prepare(
+      'INSERT OR REPLACE INTO pending_cloud_member_deletions (username, firestore_id, deleted_at) VALUES (?, ?, ?)'
+    ).run(target.username.toLowerCase(), `member_${target.username.toLowerCase()}`, new Date().toISOString());
+  }
+  checkpointDatabase('PASSIVE');
+  broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/mark-cloud-synced', requireAdmin, (req, res) => {
+  const { usernames, deletedUsernames } = req.body as {
+    usernames?: string[];
+    deletedUsernames?: string[];
+  };
+  db.transaction(() => {
+    if (Array.isArray(usernames) && usernames.length > 0) {
+      for (const u of usernames) {
+        const clean = String(u || '').trim().toLowerCase();
+        if (!clean) continue;
+        db.prepare('UPDATE users SET pending_cloud_sync = 0, previous_username = ? WHERE LOWER(username) = LOWER(?)').run('', clean);
+      }
+    } else {
+      db.prepare('UPDATE users SET pending_cloud_sync = 0, previous_username = ? WHERE pending_cloud_sync = 1').run('');
+    }
+    if (Array.isArray(deletedUsernames) && deletedUsernames.length > 0) {
+      for (const du of deletedUsernames) {
+        const clean = String(du || '').trim().toLowerCase();
+        if (!clean) continue;
+        db.prepare('DELETE FROM pending_cloud_member_deletions WHERE LOWER(username) = LOWER(?)').run(clean);
+      }
+    } else {
+      db.prepare('DELETE FROM pending_cloud_member_deletions').run();
+    }
+  })();
   checkpointDatabase('PASSIVE');
   broadcastEvent({ type: 'members:synced', payload: { updatedAt: new Date().toISOString() } });
   res.json({ ok: true });
@@ -1371,6 +1484,7 @@ app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
       avatar_color?: string;
       avatar_url?: string;
       show_in_members?: number | boolean;
+      auth_hashes?: string[];
     }>;
     siteSettings?: {
       brandName?: string;
@@ -1397,12 +1511,38 @@ app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
             .trim()
             .toLowerCase()
             .replace(/[^a-z0-9._-]/g, '');
+          if (cleanUsername && cleanUsername.length >= 2) {
+            cloudUsernames.add(cleanUsername);
+          }
+        }
+
+        // Delete stale non-pending local students BEFORE upserts so username renames never cause false NFC/QR collisions
+        if (allowDeletions && cloudUsernames.size >= 1) {
+          const localStudents = db
+            .prepare(`SELECT id, username FROM users WHERE role = 'student' AND COALESCE(pending_cloud_sync, 0) = 0`)
+            .all() as Array<{ id: number; username: string }>;
+          for (const ls of localStudents) {
+            if (!cloudUsernames.has(ls.username.trim().toLowerCase())) {
+              db.prepare('DELETE FROM users WHERE id = ?').run(ls.id);
+            }
+          }
+        }
+
+        for (const m of members) {
+          const cleanUsername = String(m.username || '')
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9._-]/g, '');
           if (!cleanUsername || cleanUsername.length < 2) continue;
-          cloudUsernames.add(cleanUsername);
 
           const existing = db
             .prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)')
-            .get(cleanUsername) as (AuthUser & { show_in_members?: number }) | undefined;
+            .get(cleanUsername) as (AuthUser & { show_in_members?: number; pending_cloud_sync?: number }) | undefined;
+
+          // Do not overwrite unpushed Pembina edits until Main Admin flushes them to Cloud Firestore
+          if (existing?.pending_cloud_sync === 1) {
+            continue;
+          }
 
           const role: 'admin' | 'student' =
             cleanUsername === 'admin' ? 'admin' : m.role === 'admin' ? 'admin' : 'student';
@@ -1421,33 +1561,51 @@ app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
               ? m.show_in_members === true || m.show_in_members === 1
                 ? 1
                 : 0
-              : existing?.show_in_members ?? (role === 'student' ? 1 : 1);
+              : existing?.show_in_members ?? 1;
           const nis = String(m.nis || '').trim().slice(0, 40) || existing?.nis || cleanUsername;
           const parentWa =
             m.parent_whatsapp !== undefined
               ? normalizeWhatsappServer(m.parent_whatsapp) || String(m.parent_whatsapp).trim().slice(0, 30)
               : existing?.parent_whatsapp || '';
+          const authHashesJson = Array.isArray(m.auth_hashes) && m.auth_hashes.length > 0
+            ? JSON.stringify(m.auth_hashes.map(String).slice(0, 6))
+            : null;
 
           if (existing) {
             let nextNfc = String(m.nfc_uid || '').trim().toUpperCase() || existing.nfc_uid;
             if (nextNfc) {
               const dupNfc = db
-                .prepare('SELECT id FROM users WHERE UPPER(nfc_uid) = UPPER(?) AND id != ?')
-                .get(nextNfc, existing.id);
-              if (dupNfc) nextNfc = existing.nfc_uid;
+                .prepare('SELECT id, username FROM users WHERE UPPER(nfc_uid) = UPPER(?) AND id != ?')
+                .get(nextNfc, existing.id) as { id: number; username: string } | undefined;
+              if (dupNfc) {
+                // Free conflicting NFC UID if that row is also part of cloud sync (e.g. swapped UIDs)
+                if (cloudUsernames.has(dupNfc.username.trim().toLowerCase())) {
+                  db.prepare('UPDATE users SET nfc_uid = ? WHERE id = ?').run(`TMP_NFC_${dupNfc.id}_${Date.now()}`, dupNfc.id);
+                } else {
+                  nextNfc = existing.nfc_uid;
+                }
+              }
             }
             let nextQr = String(m.qr_code_token || '').trim().toUpperCase() || existing.qr_code_token;
             if (nextQr) {
               const dupQr = db
-                .prepare('SELECT id FROM users WHERE UPPER(qr_code_token) = UPPER(?) AND id != ?')
-                .get(nextQr, existing.id);
-              if (dupQr) nextQr = existing.qr_code_token;
+                .prepare('SELECT id, username FROM users WHERE UPPER(qr_code_token) = UPPER(?) AND id != ?')
+                .get(nextQr, existing.id) as { id: number; username: string } | undefined;
+              if (dupQr) {
+                if (cloudUsernames.has(dupQr.username.trim().toLowerCase())) {
+                  db.prepare('UPDATE users SET qr_code_token = ? WHERE id = ?').run(`TMP_QR_${dupQr.id}_${Date.now()}`, dupQr.id);
+                } else {
+                  nextQr = existing.qr_code_token;
+                }
+              }
             }
 
             db.prepare(`
               UPDATE users
               SET role = ?, full_name = ?, nis = ?, kelas = ?, division = ?, bio = ?,
-                  nfc_uid = ?, qr_code_token = ?, parent_whatsapp = ?, avatar_color = ?, avatar_url = ?, show_in_members = ?
+                  nfc_uid = ?, qr_code_token = ?, parent_whatsapp = ?, avatar_color = ?, avatar_url = ?, show_in_members = ?,
+                  auth_hashes = COALESCE(?, auth_hashes),
+                  pending_cloud_sync = 0, previous_username = '', updated_at = ?
               WHERE id = ?
             `).run(
               role,
@@ -1462,28 +1620,44 @@ app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
               avatarColor,
               avatarUrl,
               showInMembers,
+              authHashesJson,
+              now,
               existing.id
             );
           } else {
             let nextNfc =
               String(m.nfc_uid || '').trim().toUpperCase() ||
               `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-            if (db.prepare('SELECT id FROM users WHERE UPPER(nfc_uid) = UPPER(?)').get(nextNfc)) {
-              nextNfc = `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+            const dupNfc = db
+              .prepare('SELECT id, username FROM users WHERE UPPER(nfc_uid) = UPPER(?)')
+              .get(nextNfc) as { id: number; username: string } | undefined;
+            if (dupNfc) {
+              if (cloudUsernames.has(dupNfc.username.trim().toLowerCase())) {
+                db.prepare('UPDATE users SET nfc_uid = ? WHERE id = ?').run(`TMP_NFC_${dupNfc.id}_${Date.now()}`, dupNfc.id);
+              } else {
+                nextNfc = `04${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+              }
             }
             let nextQr =
               String(m.qr_code_token || '').trim().toUpperCase() ||
               `NMC-${cleanUsername.toUpperCase().slice(0, 8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
-            if (db.prepare('SELECT id FROM users WHERE UPPER(qr_code_token) = UPPER(?)').get(nextQr)) {
-              nextQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+            const dupQr = db
+              .prepare('SELECT id, username FROM users WHERE UPPER(qr_code_token) = UPPER(?)')
+              .get(nextQr) as { id: number; username: string } | undefined;
+            if (dupQr) {
+              if (cloudUsernames.has(dupQr.username.trim().toLowerCase())) {
+                db.prepare('UPDATE users SET qr_code_token = ? WHERE id = ?').run(`TMP_QR_${dupQr.id}_${Date.now()}`, dupQr.id);
+              } else {
+                nextQr = `NMC-CMS-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+              }
             }
             const defaultPass = role === 'admin' ? 'pembina123' : 'siswa123';
             db.prepare(`
               INSERT INTO users (
                 username, password_hash, role, full_name, nis, kelas, division, bio,
-                nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, created_at
+                nfc_uid, qr_code_token, parent_whatsapp, avatar_color, avatar_url, show_in_members, auth_hashes, pending_cloud_sync, previous_username, updated_at, created_at
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?)
             `).run(
               cleanUsername,
               hashPassword(defaultPass),
@@ -1499,21 +1673,12 @@ app.post('/api/admin/sync-cloud-state', requireAdmin, (req, res) => {
               avatarColor,
               avatarUrl,
               showInMembers,
+              authHashesJson || '[]',
+              now,
               now
             );
           }
           syncedMembers++;
-        }
-
-        if (allowDeletions && cloudUsernames.size >= 1) {
-          const localStudents = db
-            .prepare(`SELECT id, username FROM users WHERE role = 'student'`)
-            .all() as Array<{ id: number; username: string }>;
-          for (const ls of localStudents) {
-            if (!cloudUsernames.has(ls.username.trim().toLowerCase())) {
-              db.prepare('DELETE FROM users WHERE id = ?').run(ls.id);
-            }
-          }
         }
       }
 

@@ -333,6 +333,25 @@ export function initDatabase() {
   if (!userCols.some((c) => c.name === 'parent_whatsapp')) {
     db.exec(`ALTER TABLE users ADD COLUMN parent_whatsapp TEXT NOT NULL DEFAULT ''`);
   }
+  if (!userCols.some((c) => c.name === 'auth_hashes')) {
+    db.exec(`ALTER TABLE users ADD COLUMN auth_hashes TEXT NOT NULL DEFAULT '[]'`);
+  }
+  if (!userCols.some((c) => c.name === 'pending_cloud_sync')) {
+    db.exec(`ALTER TABLE users ADD COLUMN pending_cloud_sync INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!userCols.some((c) => c.name === 'previous_username')) {
+    db.exec(`ALTER TABLE users ADD COLUMN previous_username TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!userCols.some((c) => c.name === 'updated_at')) {
+    db.exec(`ALTER TABLE users ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_cloud_member_deletions (
+      username TEXT PRIMARY KEY,
+      firestore_id TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT NOT NULL
+    );
+  `);
   const attCols = db.prepare(`PRAGMA table_info(attendance_records)`).all() as Array<{ name: string }>;
   if (!attCols.some((c) => c.name === 'check_out_time')) {
     db.exec(`ALTER TABLE attendance_records ADD COLUMN check_out_time TEXT NOT NULL DEFAULT ''`);

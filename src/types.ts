@@ -26,6 +26,9 @@ export interface StudentProfile {
   owner_uid?: string;
   auth_hashes?: string[];
   nfc_hash?: string;
+  pending_cloud_sync?: number;
+  previous_username?: string;
+  updated_at?: string;
   created_at: string;
   attendance_count?: number;
   works_count?: number;
